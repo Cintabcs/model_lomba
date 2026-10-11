@@ -1,0 +1,62 @@
+# =============================================================================
+# MULTI-MODEL EDGE AI CONFIGURATION FOR WATER QUALITY CLASSIFICATION
+# =============================================================================
+
+dataset:
+  paths:
+    - "../python_recorder/dataset"
+    - "../python_recorder/dataset/dummy"
+  sample_rate_hz: 10
+  window_sec: 5
+  window_size: 50        # 5 seconds * 10 Hz
+  step_size: 25          # 50% overlap for window segmentation
+
+split:
+  test_size: 0.20
+  split_strategy: "group_by_file"  # Group-based split (prevents temporal data leakage!)
+  random_state: 42
+  shuffle: true
+
+features:
+  - "tds_mean"
+  - "tds_std"
+  - "tds_min"
+  - "tds_max"
+  - "turb_mean"
+  - "turb_std"
+  - "turb_min"
+  - "turb_max"
+
+labels:
+  low: 0
+  medium: 1
+  high: 2
+
+# Select specific model ("random_forest", "decision_tree", "svm", "knn", "naive_bayes")
+# or "all" to benchmark and compare all models at once!
+model:
+  type: "all"
+  random_state: 42
+  
+  # Hyperparameters for each model type:
+  decision_tree:
+    max_depth: 8
+  
+  random_forest:
+    n_estimators: 25
+    max_depth: 12
+    criterion: "gini"
+    
+  svm:
+    kernel: "linear"
+    C: 1.0
+    
+  knn:
+    n_neighbors: 5
+    
+  naive_bayes:
+    var_smoothing: 1e-9
+
+export:
+  models_dir: "models"
+  cpp_header_dir: "esp"

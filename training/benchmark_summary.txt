@@ -1,0 +1,27 @@
+MODEL BENCHMARK COMPARISON SUMMARY FOR ESP32 EDGE AI
+======================================================================
+Model: Decision Tree
+  - Unseen Test Accuracy: 97.79%
+  - 5-Fold Group CV: 98.59% +- 0.85%
+  - C++ Header Size: 1.16 KB (1186 B)
+
+Model: Random Forest
+  - Unseen Test Accuracy: 100.00%
+  - 5-Fold Group CV: 99.54% +- 0.44%
+  - C++ Header Size: 15.63 KB (16007 B)
+
+Model: Linear SVM
+  - Unseen Test Accuracy: 99.94%
+  - 5-Fold Group CV: 99.85% +- 0.26%
+  - C++ Header Size: 1.49 KB (1530 B)
+
+Model: KNN
+  - Unseen Test Accuracy: 100.00%
+  - 5-Fold Group CV: 99.95% +- 0.09%
+  - C++ Header Size: 80.38 KB (82304 B)
+
+Model: Naive Bayes
+  - Unseen Test Accuracy: 100.00%
+  - 5-Fold Group CV: 99.99% +- 0.02%
+  - C++ Header Size: 1.00 KB (1024 B)
+
