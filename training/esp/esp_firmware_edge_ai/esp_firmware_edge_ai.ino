@@ -35,14 +35,14 @@
   const int PIN_TDS           = 34; // Sinyal Analog TDS (GPIO34 / ADC1)
   const int PIN_TURBIDITY     = 35; // Sinyal Analog Turbidity (GPIO35 / ADC1)
 
-  // Pin Indikator LED Klasifikasi Hasil
-  const int PIN_LED_GREEN     = 18; // LED Hijau  -> Low (Air Bersih)
-  const int PIN_LED_YELLOW    = 19; // LED Kuning -> Medium (Air Sedang)
-  const int PIN_LED_RED       = 21; // LED Merah  -> High (Air Kotor / Keruh)
+  // Pin Indikator LED Klasifikasi Hasil (Sesuai Jalur PCB)
+  const int PIN_LED_RED       = 23; // LED Merah  -> High (Air Kotor / Keruh) (D23)
+  const int PIN_LED_YELLOW    = 22; // LED Kuning -> Medium (Air Sedang)      (D22)
+  const int PIN_LED_GREEN     = 25; // LED Hijau  -> Low (Air Bersih)         (D25)
 
-  // Pin Indikator Status & Tombol Trigger
-  const int PIN_LED_WHITE     = 22; // LED Putih  -> Standby Solid ON / Blink saat Proses
-  const int PIN_BUTTON        = 23; // Push Button (Satu kaki ke GPIO23, satu ke GND)
+  // Pin Indikator Status & Tombol Trigger (Sesuai Jalur PCB)
+  const int PIN_LED_WHITE     = 33; // LED Putih  -> Standby Solid ON / Blink saat Proses (D33)
+  const int PIN_BUTTON        = 32; // Push Button (D32, INPUT_PULLUP ke GND)
 
   const float VREF            = 3.3;       
   const float ADC_RESOLUTION  = 4095.0; // 12-bit ADC ESP32
