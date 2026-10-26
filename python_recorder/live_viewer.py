@@ -3,11 +3,12 @@
 ESP32 EDGE AI OPERATOR ASSISTANT (PRESET LOW / MEDIUM / HIGH INJECTOR)
 =============================================================================
 Fitur:
-1. Hubungkan ke ESP32 secara wireless via Wi-Fi Rumah (MyRepublic).
+1. Hubungkan ke ESP32 secara wireless via Wi-Fi TCP Port 8080.
 2. Memilih Preset Kategori (LOW, MEDIUM, HIGH) langsung dari laptop.
 3. Memberikan aba-aba/CUE yang jelas saat sistem sudah siap.
 4. Mendeteksi tekanan tombol Push Button (D32) di ESP32 dan memantau
    hitung mundur 30 detik serta hasil klasifikasi AI secara realtime!
+5. Mendukung pembatalan sesi (Cancel) kapan saja saat tombol ditekan kembali.
 =============================================================================
 """
 
@@ -29,7 +30,8 @@ current_state = {
     "preset": "LOW",
     "is_testing": False,
     "test_elapsed_sec": 0,
-    "edge_ai_class": "Standby"
+    "edge_ai_class": "Standby",
+    "cancelled": False
 }
 
 client_socket = None
@@ -81,13 +83,14 @@ def receive_thread():
                     obj = json.loads(line)
                     with lock:
                         current_state["connected"] = True
-                        current_state["sample_id"] = obj.get("sample_id", 0)
-                        current_state["tds_ppm"] = obj.get("tds_ppm", 0.0)
-                        current_state["turbidity_ntu"] = obj.get("turbidity_ntu", 0.0)
-                        current_state["preset"] = obj.get("preset", "LOW")
+                        current_state["sample_id"] = obj.get("sample_id", current_state["sample_id"])
+                        current_state["tds_ppm"] = obj.get("tds_ppm", current_state["tds_ppm"])
+                        current_state["turbidity_ntu"] = obj.get("turbidity_ntu", current_state["turbidity_ntu"])
+                        current_state["preset"] = obj.get("preset", current_state["preset"])
                         current_state["is_testing"] = obj.get("is_testing", False)
                         current_state["test_elapsed_sec"] = obj.get("test_elapsed_sec", 0)
-                        current_state["edge_ai_class"] = obj.get("edge_ai_class", "Standby")
+                        current_state["edge_ai_class"] = obj.get("edge_ai_class", current_state["edge_ai_class"])
+                        current_state["cancelled"] = obj.get("cancelled", False)
                 except json.JSONDecodeError:
                     pass
         except socket.timeout:
@@ -114,7 +117,8 @@ def wait_for_test_session(selected_name):
     print(f" [✓] PRESET BERHASIL DIKIRIM KE ESP32 : [{selected_name}]")
     print(" 📢 [CUE / ABA-ABA UNTUKMU]:")
     print(" >> SISTEM SUDAH SIAP & AMAN! <<")
-    print(" >> Silakan TEKAN PUSH BUTTON (D32) di ESP32 sekarang! <<")
+    print(" >> Silakan KLIK PUSH BUTTON (D32) di ESP32 sekarang! <<")
+    print(" (Catatan: Jika sedang jalan dan ingin cancel, klik tombol sekali lagi)")
     print("=" * 70)
     print(" Menunggu kamu menekan tombol di ESP32... (Tekan Ctrl+C untuk batal)\n")
 
@@ -130,10 +134,11 @@ def wait_for_test_session(selected_name):
                 print("\n" + "#" * 70)
                 print(" 🎉 [TOMBOL DITEKAN!] PENGUJIAN 30 DETIK RESMI DIMULAI!")
                 print(" Status Fisik PCB: LED Biru (D33) Sedang Berkedip Cepat!")
+                print(" Tips: Klik tombol sekali lagi jika ingin membatalkan pengujian.")
                 print("#" * 70)
                 break
             
-            sys.stdout.write(f"\r [STANDBY] Simulasi TDS: {tds:5.1f} PPM | Turbidity: {turb:5.1f} NTU | Menunggu tombol...")
+            sys.stdout.write(f"\r [STANDBY] Simulasi TDS: {tds:5.1f} PPM | Turbidity: {turb:5.1f} NTU | Menunggu tombol...   ")
             sys.stdout.flush()
             time.sleep(0.2)
 
@@ -146,21 +151,33 @@ def wait_for_test_session(selected_name):
                 turb = current_state["turbidity_ntu"]
                 tds = current_state["tds_ppm"]
                 ai_class = current_state["edge_ai_class"]
+                was_cancelled = current_state.get("cancelled", False)
 
             if not testing:
-                # Selesai 30 detik!
+                if was_cancelled:
+                    print("\n\n" + "=" * 70)
+                    print(" 🛑 [DIBATALKAN] Pengujian 30 detik dibatalkan oleh pengguna!")
+                    print(" Status Fisik PCB : LED Hasil Padam & LED Biru Kembali Solid ON.")
+                    print("=" * 70)
+                    time.sleep(1.0)
+                    break
+
+                # Selesai 30 detik normal!
                 print("\n\n" + "=" * 70)
                 print(f" [✓ SELESAI!] PENGUJIAN 30 DETIK TELAH TUNTAS!")
                 print(f" HASIL AKHIR TERKUNCI : [{ai_class.upper()}]")
                 if ai_class == "Low":
-                    print(" Status LED Fisik PCB : 🟢 LED HIJAU (D25) TETAP MENYALA!")
+                    print(" Status LED Fisik PCB : 🟢 LED HIJAU (D25) Menyala 10 Detik (Auto-Off)!")
                 elif ai_class == "Medium":
-                    print(" Status LED Fisik PCB : 🟡 LED KUNING (D22) TETAP MENYALA!")
+                    print(" Status LED Fisik PCB : 🟡 LED KUNING (D22) Menyala 10 Detik (Auto-Off)!")
                 elif ai_class == "High":
-                    print(" Status LED Fisik PCB : 🔴 LED MERAH (D23) TETAP MENYALA!")
+                    print(" Status LED Fisik PCB : 🔴 LED MERAH (D23) Menyala 10 Detik (Auto-Off)!")
                 print(" Status LED Status    : 🔵 LED Biru (D33) Kembali Solid ON.")
                 print("=" * 70)
-                input("\nTekan Enter untuk kembali ke Menu...")
+                try:
+                    input("\n Tekan Enter untuk kembali ke Menu...")
+                except (EOFError, KeyboardInterrupt):
+                    pass
                 break
 
             if elapsed != last_sec:
@@ -183,14 +200,18 @@ def main():
 
     print("=" * 70)
     print("   ESP32 EDGE AI - OPERATOR ASSISTANT (PRESET INJECTOR)   ")
-    print("   Mode Wi-Fi: MyRepublic_C2222847 | Port: 8080            ")
+    print(f"   Target ESP32: {ESP_IP} | Port: {ESP_PORT}             ")
     print("=" * 70)
 
     target_ip = ESP_IP
     while not connect_to_esp(target_ip, ESP_PORT):
-        alt = input(f"[?] Masukkan IP ESP32 (atau Enter untuk coba lagi {target_ip}): ").strip()
-        if alt:
-            target_ip = alt
+        try:
+            alt = input(f"[?] Masukkan IP ESP32 (atau Enter untuk coba lagi {target_ip}): ").strip()
+            if alt:
+                target_ip = alt
+        except (EOFError, KeyboardInterrupt):
+            print("\n[✓] Keluar.")
+            return
 
     # Background thread penerima data
     t = threading.Thread(target=receive_thread, daemon=True)
@@ -215,7 +236,11 @@ def main():
             print(" [Q] Keluar dari Program")
             print("=" * 70)
 
-            choice = input(" Masukkan pilihanmu (1/2/3/Q): ").strip().lower()
+            try:
+                choice = input(" Masukkan pilihanmu (1/2/3/Q): ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\n\n[✓] Program dihentikan.")
+                break
 
             if choice == "1":
                 send_command("SET_PRESET:LOW")
