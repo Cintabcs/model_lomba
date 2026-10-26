@@ -137,29 +137,39 @@ void setClassificationLeds(String label) {
 }
 
 // =============================================================================
-// FUNGSI CEK PUSH BUTTON (DEBOUNCE NON-BLOCKING)
+// FUNGSI CEK PUSH BUTTON (DEBOUNCE NON-BLOCKING & ANTI-FALSE-TRIGGER BOOT)
 // =============================================================================
 bool checkButtonPressed() {
-  static unsigned long lastDebounceTime = 0;
-  static int lastState = HIGH;
-  static int buttonState = HIGH;
-  int reading = digitalRead(PIN_BUTTON);
-  bool triggered = false;
-
-  if (reading != lastState) {
-    lastDebounceTime = millis();
+  // 1. Abaikan transien daya saat 2 detik pertama setelah dicolok kabel/baterai
+  if (millis() < 2000) {
+    return false;
   }
 
-  if ((millis() - lastDebounceTime) > 50) { // Debounce 50 ms
-    if (reading != buttonState) {
-      buttonState = reading;
-      if (buttonState == LOW) { // Tombol ditekan (koneksi ke GND)
-        triggered = true;
+  static int lastStableState = HIGH;
+  static int lastReadState = HIGH;
+  static unsigned long lastDebounceTime = 0;
+  bool pressed = false;
+
+  int reading = digitalRead(PIN_BUTTON);
+
+  // Jika kondisi pembacaan berubah (kemungkinan noise / bouncing)
+  if (reading != lastReadState) {
+    lastDebounceTime = millis();
+    lastReadState = reading;
+  }
+
+  // Jika pembacaan sudah stabil selama 25 ms (responsif, 1x klik langsung kena!)
+  if ((millis() - lastDebounceTime) >= 25) {
+    if (reading != lastStableState) {
+      lastStableState = reading;
+      // Trigger HANYA saat tombol baru ditekan (transisi HIGH ke LOW)
+      if (lastStableState == LOW) {
+        pressed = true;
       }
     }
   }
-  lastState = reading;
-  return triggered;
+
+  return pressed;
 }
 
 // =============================================================================
