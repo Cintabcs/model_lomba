@@ -97,20 +97,17 @@ void setClassificationLeds(String label) {
 }
 
 // =============================================================================
-// DETEKSI PUSH BUTTON (ANTI NOISE GLITCH 80ms & SINGLE-PRESS INSTANT)
+// DETEKSI PUSH BUTTON (UNIVERSAL: MOMENTARY & SAKLAR LATCHING / SELF-LOCK)
 // =============================================================================
 bool checkButtonPressed() {
   static int lastPhysicalReading = -1;
   static int stableReading = -1;
   static unsigned long lastDebounceMs = 0;
-  static bool eventFired = false;
 
   // 1. Kunci pengaman startup: abaikan pembacaan selama 1.5 detik setelah boot
   if (millis() < buttonArmTime) {
     stableReading = digitalRead(PIN_BUTTON);
     lastPhysicalReading = stableReading;
-    buttonIdleState = stableReading;
-    eventFired = false;
     return false;
   }
 
@@ -123,21 +120,17 @@ bool checkButtonPressed() {
     lastPhysicalReading = currentReading;
   }
 
-  // Filter Noise: Sinyal harus stabil selama minimal 80 ms (mencegah glitch RF/ESD)
-  if ((millis() - lastDebounceMs) >= 80) {
+  // Filter Debounce Stabil 60 ms
+  if ((millis() - lastDebounceMs) >= 60) {
     if (currentReading != stableReading) {
       stableReading = currentReading;
 
-      // Apakah tombol sedang DITEKAN (berbeda dari kondisi idle)?
-      if (stableReading != buttonIdleState) {
-        if (!eventFired) {
-          eventFired = true;
-          return true; // TEPAT 1x TRIGGER PADA TEKANAN PERTAMA!
-        }
-      } else {
-        // Tombol telah DILEPAS kembali ke posisi normal
-        eventFired = false;
-      }
+      // SETIAP KALI SAKLAR BERUBAH LOGIKA (Baik Masuk maupun Keluar):
+      // Ini menjamin tombol LATCHING (Self-Locking) maupun MOMENTARY
+      // akan SELALU memicu aksi tepat 1x di SETIAP KALI PENCETAN!
+      Serial.print("[BUTTON EVENT] State beralih ke: ");
+      Serial.println(stableReading == LOW ? "LOW" : "HIGH");
+      return true;
     }
   }
 
