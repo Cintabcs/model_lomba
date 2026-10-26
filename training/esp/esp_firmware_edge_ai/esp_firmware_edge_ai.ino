@@ -198,77 +198,184 @@ bool checkButtonPressed() {
 // FUNGSI HTML & CAPTIVE PORTAL WEB SERVER
 // =============================================================================
 void handlePortalRoot() {
-  // Pindai daftar Wi-Fi yang tersedia
+  // Pindai daftar Wi-Fi 2.4 GHz sekitar
   int n = WiFi.scanNetworks();
-  String wifiOptions = "";
-  for (int i = 0; i < n; ++i) {
-    String ssid = WiFi.SSID(i);
-    int rssi = WiFi.RSSI(i);
-    wifiOptions += "<option value='" + ssid + "'>" + ssid + " (" + String(rssi) + " dBm)</option>";
+  String wifiListHtml = "";
+
+  if (n <= 0) {
+    wifiListHtml = "<div class='wifi-item'><span style='color:#94a3b8;'>Tidak ada Wi-Fi terdeteksi. Silakan ketik nama Wi-Fi manual di bawah.</span></div>";
+  } else {
+    for (int i = 0; i < n; ++i) {
+      String ssid = WiFi.SSID(i);
+      int rssi = WiFi.RSSI(i);
+      String security = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "🔓 Terbuka" : "🔒 WPA2";
+      
+      String signalColor = "#22c55e"; // Hijau
+      String signalText = "Kuat";
+      if (rssi < -75) { signalColor = "#ef4444"; signalText = "Lemah"; }
+      else if (rssi < -60) { signalColor = "#eab308"; signalText = "Sedang"; }
+
+      wifiListHtml += "<div class='wifi-item' onclick='selectWifi(\"" + ssid + "\")'>";
+      wifiListHtml += "  <div class='wifi-info'>";
+      wifiListHtml += "    <div class='wifi-name'>" + ssid + "</div>";
+      wifiListHtml += "    <div class='wifi-meta'>" + security + " &bull; <span style='color:" + signalColor + "; font-weight:600;'>" + signalText + " (" + String(rssi) + " dBm)</span></div>";
+      wifiListHtml += "  </div>";
+      wifiListHtml += "  <button type='button' class='btn-select'>PILIH</button>";
+      wifiListHtml += "</div>";
+    }
   }
 
-  String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1'>";
-  html += "<title>ESP32 Water AI Setup</title>";
+  String currentSsidDisplay = (savedSsid == "") ? "Belum Terhubung" : savedSsid;
+
+  String html = "<!DOCTYPE html><html lang='id'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+  html += "<title>ESP32 Edge AI - Pengaturan Wi-Fi</title>";
   html += "<style>";
-  html += "body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 20px; display: flex; justify-content: center; }";
-  html += ".card { background: #1e293b; border: 1px solid #334155; border-radius: 16px; padding: 24px; max-width: 400px; width: 100%; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5); }";
-  html += "h2 { color: #38bdf8; margin-top: 0; text-align: center; }";
-  html += "p { color: #94a3b8; font-size: 14px; text-align: center; }";
-  html += "label { font-size: 13px; font-weight: 600; color: #cbd5e1; display: block; margin-top: 14px; }";
-  html += "select, input[type='text'], input[type='password'] { width: 100%; padding: 12px; margin-top: 6px; border: 1px solid #475569; border-radius: 8px; background: #0f172a; color: #fff; box-sizing: border-box; font-size: 14px; }";
-  html += "input[type='submit'] { width: 100%; background: #0284c7; color: white; border: none; padding: 14px; border-radius: 8px; font-weight: 700; font-size: 15px; margin-top: 24px; cursor: pointer; transition: 0.2s; }";
-  html += "input[type='submit']:hover { background: #0369a1; }";
-  html += ".badge { display: inline-block; background: #0369a1; padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: bold; }";
-  html += "</style></head><body>";
-  html += "<div class='card'>";
-  html += "<h2>🌊 Water AI Setup</h2>";
-  html += "<p>Hubungkan ESP32 ke jaringan Wi-Fi untuk mengaktifkan telemetri & live viewer laptop.</p>";
-  html += "<form method='POST' action='/save'>";
+  html += "* { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }";
+  html += "body { background: #0b1120; color: #f8fafc; margin: 0; padding: 16px; display: flex; justify-content: center; }";
+  html += ".container { max-width: 440px; width: 100%; background: #1e293b; border: 1px solid #334155; border-radius: 20px; padding: 22px; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5); }";
+  html += ".header { text-align: center; margin-bottom: 20px; }";
+  html += ".header h2 { margin: 6px 0; color: #38bdf8; font-size: 22px; }";
+  html += ".header p { margin: 0; color: #94a3b8; font-size: 13px; }";
+  html += ".info-box { background: #0f172a; border: 1px solid #334155; border-radius: 12px; padding: 14px; margin-bottom: 18px; font-size: 12px; }";
+  html += ".info-row { display: flex; justify-content: space-between; margin-bottom: 6px; }";
+  html += ".info-row:last-child { margin-bottom: 0; }";
+  html += ".info-label { color: #94a3b8; }";
+  html += ".info-value { color: #38bdf8; font-weight: 600; }";
+  html += ".section-title { font-size: 13px; font-weight: 700; color: #cbd5e1; text-transform: uppercase; margin: 16px 0 8px; letter-spacing: 0.5px; }";
+  html += ".wifi-list { max-height: 190px; overflow-y: auto; background: #0f172a; border: 1px solid #334155; border-radius: 12px; padding: 6px; margin-bottom: 16px; }";
+  html += ".wifi-item { display: flex; justify-content: space-between; align-items: center; padding: 10px; border-radius: 8px; cursor: pointer; transition: 0.2s; border-bottom: 1px solid #1e293b; }";
+  html += ".wifi-item:hover { background: #1e293b; }";
+  html += ".wifi-name { font-size: 14px; font-weight: 600; color: #f1f5f9; }";
+  html += ".wifi-meta { font-size: 11px; color: #64748b; margin-top: 2px; }";
+  html += ".btn-select { background: #0284c7; color: white; border: none; padding: 6px 12px; border-radius: 6px; font-size: 11px; font-weight: 700; cursor: pointer; }";
+  html += "label { font-size: 12px; font-weight: 600; color: #94a3b8; display: block; margin-top: 12px; }";
+  html += "input[type='text'], input[type='password'] { width: 100%; padding: 12px; margin-top: 5px; border: 1px solid #475569; border-radius: 8px; background: #0f172a; color: #fff; font-size: 14px; }";
+  html += "input[type='submit'] { width: 100%; background: linear-gradient(135deg, #0284c7, #2563eb); color: white; border: none; padding: 14px; border-radius: 10px; font-weight: 700; font-size: 15px; margin-top: 20px; cursor: pointer; }";
+  html += ".tips { margin-top: 16px; padding: 12px; background: rgba(56, 189, 248, 0.08); border-left: 3px solid #38bdf8; border-radius: 6px; font-size: 12px; color: #94a3b8; line-height: 1.5; }";
+  html += "</style>";
+  html += "<script>";
+  html += "function selectWifi(name) {";
+  html += "  document.getElementById('ssid_input').value = name;";
+  html += "  document.getElementById('password_input').focus();";
+  html += "}";
+  html += "</script></head><body>";
   
-  html += "<label>PILIH WI-FI TERSEDIA:</label>";
-  html += "<select name='ssid' id='ssid_select' onchange='document.getElementById(\"custom_ssid\").value = this.value;'>";
-  html += "<option value=''>-- Pilih Jaringan Wi-Fi --</option>";
-  html += wifiOptions;
-  html += "</select>";
+  html += "<div class='container'>";
+  html += "  <div class='header'>";
+  html += "    <h2>💧 ESP32 Water AI Setup</h2>";
+  html += "    <p>Pengaturan Jaringan & Telemetri Kualitas Air</p>";
+  html += "  </div>";
 
-  html += "<label>ATAU KETIK SSID MANUAL:</label>";
-  html += "<input type='text' id='custom_ssid' name='custom_ssid' placeholder='Nama Wi-Fi...'>";
+  html += "  <div class='info-box'>";
+  html += "    <div class='info-row'><span class='info-label'>Status Wi-Fi Saat Ini</span><span class='info-value'>" + currentSsidDisplay + "</span></div>";
+  html += "    <div class='info-row'><span class='info-label'>IP Gateway Hotspot</span><span class='info-value'>192.168.4.1</span></div>";
+  html += "    <div class='info-row'><span class='info-label'>MAC Address ESP32</span><span class='info-value'>" + WiFi.macAddress() + "</span></div>";
+  html += "    <div class='info-row'><span class='info-label'>Edge AI Classifier</span><span class='info-value' style='color:#22c55e;'>100% Offline Ready</span></div>";
+  html += "  </div>";
 
-  html += "<label>PASSWORD WI-FI:</label>";
-  html += "<input type='password' name='password' placeholder='Masukkan password Wi-Fi...'>";
+  html += "  <div class='section-title'>PILIH WI-FI 2.4 GHz TERSEDIA:</div>";
+  html += "  <div class='wifi-list'>" + wifiListHtml + "</div>";
 
-  html += "<input type='submit' value='SIMPAN & SAMBUNGKAN'>";
-  html += "</form>";
-  html += "<div style='text-align:center; margin-top:16px;'><span class='badge'>Edge AI Offline Ready</span></div>";
+  html += "  <form method='POST' action='/save'>";
+  html += "    <label>NAMA WI-FI (SSID):</label>";
+  html += "    <input type='text' id='ssid_input' name='ssid' value='" + savedSsid + "' placeholder='Pilih dari daftar atau ketik manual...' required>";
+
+  html += "    <label>PASSWORD WI-FI:</label>";
+  html += "    <input type='password' id='password_input' name='password' placeholder='Masukkan password Wi-Fi...'>";
+
+  html += "    <input type='submit' value='⚡ HUBUNGKAN ESP32 KE WI-FI'>";
+  html += "  </form>";
+
+  html += "  <div class='tips'>";
+  html += "    💡 <b>Catatan Penting:</b><br>";
+  html += "    &bull; ESP32 hanya mendukung sinyal <b>Wi-Fi 2.4 GHz</b>.<br>";
+  html += "    &bull; Wi-Fi bersifat opsional! Uji klasifikasi kualitas air fisik tetap bisa berjalan mandiri via Push Button (D32).";
+  html += "  </div>";
   html += "</div></body></html>";
 
   webServer.send(200, "text/html", html);
 }
 
 void handlePortalSave() {
-  String reqSsid = webServer.arg("custom_ssid");
-  if (reqSsid == "") reqSsid = webServer.arg("ssid");
+  String reqSsid = webServer.arg("ssid");
+  reqSsid.trim();
   String reqPass = webServer.arg("password");
+  reqPass.trim();
 
-  if (reqSsid != "") {
+  if (reqSsid == "") {
+    webServer.send(200, "text/html", "<h3>Nama Wi-Fi tidak boleh kosong! <a href='/'>Kembali</a></h3>");
+    return;
+  }
+
+  Serial.println("\n[SETUP WEB] Menerima konfigurasi Wi-Fi baru dari HP:");
+  Serial.print("  SSID     : "); Serial.println(reqSsid);
+  Serial.print("  Password : "); Serial.println(reqPass.length() > 0 ? "********" : "(Tanpa Password)");
+
+  // Aktifkan mode Dual (AP + STA) agar ESP32 bisa tes koneksi ke router
+  // tanpa mematikan Hotspot AP yang sedang dibuka di browser HP!
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.begin(reqSsid.c_str(), reqPass.c_str());
+
+  Serial.print("[SETUP WEB] Menguji koneksi ke router");
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 25) { // Tunggu hingga 12.5 detik
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+
+  // JIKA BERHASIL TERHUBUNG:
+  if (WiFi.status() == WL_CONNECTED) {
+    savedSsid = reqSsid;
+    savedPassword = reqPass;
+
     preferences.begin("wifi_cfg", false);
-    preferences.putString("ssid", reqSsid);
-    preferences.putString("pass", reqPass);
+    preferences.putString("ssid", savedSsid);
+    preferences.putString("pass", savedPassword);
     preferences.end();
 
-    String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1'>";
-    html += "<style>body{font-family:sans-serif;background:#0f172a;color:#fff;text-align:center;padding:50px 20px;}";
-    html += ".card{background:#1e293b;border-radius:16px;padding:30px;max-width:380px;margin:auto;}h2{color:#38bdf8;}</style></head><body>";
-    html += "<div class='card'><h2>✓ PENGATURAN DISIMPAN!</h2>";
-    html += "<p>ESP32 sedang menghubungkan ke:</p>";
-    html += "<h3>" + reqSsid + "</h3>";
-    html += "<p style='color:#94a3b8;font-size:13px;'>Silakan sambungkan kembali HP/Laptop Anda ke Wi-Fi tersebut.</p></div></body></html>";
-    webServer.send(200, "text/html", html);
+    server.begin(); // Buka TCP Port 8080 untuk Live Viewer Laptop
+    isApModeActive = false;
 
-    delay(2000);
-    ESP.restart(); // Restart agar langsung terhubung ke Wi-Fi baru dengan bersih!
-  } else {
-    webServer.send(200, "text/html", "SSID Kosong! Silakan kembali dan pilih Wi-Fi.");
+    String successHtml = "<!DOCTYPE html><html lang='id'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+    successHtml += "<style>body{background:#0b1120;color:#fff;font-family:sans-serif;padding:24px;text-align:center;}";
+    successHtml += ".card{background:#1e293b;border-radius:18px;padding:28px;max-width:400px;margin:auto;border:1px solid #22c55e;box-shadow:0 10px 25px rgba(0,0,0,0.5);}";
+    successHtml += "h2{color:#22c55e;margin-top:0;} .ip-box{background:#0f172a;padding:14px;border-radius:10px;font-size:18px;font-weight:bold;color:#38bdf8;margin:16px 0;border:1px solid #334155;}</style></head><body>";
+    successHtml += "<div class='card'>";
+    successHtml += "  <h2>✅ BERHASIL TERHUBUNG!</h2>";
+    successHtml += "  <p>ESP32 kini sudah resmi terhubung ke Wi-Fi:</p>";
+    successHtml += "  <h3 style='color:#f8fafc;'>" + savedSsid + "</h3>";
+    successHtml += "  <div class='ip-box'>IP ESP32: " + WiFi.localIP().toString() + "</div>";
+    successHtml += "  <p style='color:#94a3b8;font-size:13px;'>Port TCP Telemetri: <b>8080</b></p>";
+    successHtml += "  <p style='color:#cbd5e1;font-size:13px;line-height:1.5;'>Hotspot setup akan dinonaktifkan. Silakan hubungkan kembali HP/Laptop Anda ke Wi-Fi <b>" + savedSsid + "</b> dan jalankan <code>live_viewer.py</code> di laptop!</p>";
+    successHtml += "</div></body></html>";
+
+    webServer.send(200, "text/html", successHtml);
+
+    Serial.println("\n========================================================");
+    Serial.println(" [OK] SUKSES TERSAMBUNG KE WI-FI BARU!");
+    Serial.print(" >>> ALAMAT IP ESP32 : "); Serial.println(WiFi.localIP());
+    Serial.println(" >>> PORT TCP        : 8080");
+    Serial.println("========================================================\n");
+
+    delay(3000);
+    WiFi.mode(WIFI_STA); // Nonaktifkan AP agar bersih
+  } 
+  // JIKA GAGAL TERHUBUNG (Password salah / router tidak merespons):
+  else {
+    String failHtml = "<!DOCTYPE html><html lang='id'><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+    failHtml += "<style>body{background:#0b1120;color:#fff;font-family:sans-serif;padding:24px;text-align:center;}";
+    failHtml += ".card{background:#1e293b;border-radius:18px;padding:28px;max-width:400px;margin:auto;border:1px solid #ef4444;}";
+    failHtml += "h2{color:#ef4444;margin-top:0;} a{display:inline-block;background:#0284c7;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:bold;margin-top:16px;}</style></head><body>";
+    failHtml += "<div class='card'>";
+    failHtml += "  <h2>❌ GAGAL TERHUBUNG</h2>";
+    failHtml += "  <p>ESP32 tidak dapat terhubung ke <b>" + reqSsid + "</b>.</p>";
+    failHtml += "  <p style='color:#94a3b8;font-size:13px;text-align:left;'><b>Kemungkinan penyebab:</b><br>1. Password Wi-Fi salah.<br>2. Sinyal Wi-Fi router terlalu jauh/lemah.<br>3. Jaringan adalah 5 GHz murni (ESP32 butuh 2.4 GHz).</p>";
+    failHtml += "  <a href='/'>⬅️ KEMBALI & COBA LAGI</a>";
+    failHtml += "</div></body></html>";
+
+    webServer.send(200, "text/html", failHtml);
+    Serial.println("\n[!] Gagal menghubungkan ke Wi-Fi baru. Hotspot AP tetap aktif.");
   }
 }
 
@@ -409,37 +516,10 @@ void setup() {
   savedPassword = preferences.getString("pass", "");
   preferences.end();
 
-  // 2. Fitur Reset Wi-Fi: Jika Tombol Push Button (D32) DITAHAN saat ESP32 dinyalakan (> 2 detik),
-  //    otomatis hapus Wi-Fi lama dan buka Captive Portal Hotspot AP!
-  if (digitalRead(PIN_BUTTON) == LOW) {
-    Serial.println("\n[!] Tombol terdeteksi ditekan saat power-up...");
-    int holdCount = 0;
-    while (digitalRead(PIN_BUTTON) == LOW && holdCount < 30) {
-      delay(100);
-      holdCount++;
-      digitalWrite(PIN_LED_STATUS, (holdCount % 2 == 0) ? HIGH : LOW);
-    }
-    if (holdCount >= 15) { // Ditahan > 1.5 detik
-      Serial.println("\n========================================================");
-      Serial.println(" [RESET] MENGHAPUS WI-FI TERSIMPAN! (FACTORY RESET)");
-      Serial.println("========================================================");
-      preferences.begin("wifi_cfg", false);
-      preferences.clear();
-      preferences.end();
-      savedSsid = "";
-      savedPassword = "";
-      for (int i = 0; i < 6; i++) {
-        digitalWrite(PIN_LED_STATUS, HIGH); delay(80);
-        digitalWrite(PIN_LED_STATUS, LOW); delay(80);
-      }
-      digitalWrite(PIN_LED_STATUS, HIGH);
-    }
-  }
-
-  // 3. Logika Koneksi:
+  // 2. Logika Koneksi:
   //    A. Jika belum pernah setup Wi-Fi (savedSsid kosong) -> Langsung luncurkan Hotspot AP!
   if (savedSsid == "") {
-    Serial.println("\n[WIFI] Belum ada Wi-Fi yang dikonfigurasi.");
+    Serial.println("\n[WIFI] Belum ada Wi-Fi yang dikonfigurasi. Membuka Captive Portal AP!");
     startCaptivePortal();
   } 
   //    B. Jika sudah pernah disimpan -> Coba konek ke Wi-Fi router tersebut
@@ -454,7 +534,7 @@ void setup() {
     WiFi.begin(savedSsid.c_str(), savedPassword.c_str());
 
     int retry = 0;
-    while (WiFi.status() != WL_CONNECTED && retry < 16) { // Tunggu ~8 detik
+    while (WiFi.status() != WL_CONNECTED && retry < 25) { // Beri waktu hingga 12.5 detik
       delay(500);
       Serial.print(".");
       retry++;
@@ -471,7 +551,7 @@ void setup() {
     } 
     // Jika gagal terhubung (misal router mati/ganti password) -> Luncurkan Hotspot AP!
     else {
-      Serial.println("\n[!] Gagal terhubung ke Wi-Fi tersimpan.");
+      Serial.println("\n[!] Gagal terhubung ke Wi-Fi tersimpan. Meluncurkan Hotspot Setup...");
       startCaptivePortal();
     }
   }
@@ -577,15 +657,8 @@ void loop() {
       statusLedState = !statusLedState;
       digitalWrite(PIN_LED_STATUS, statusLedState ? HIGH : LOW);
     }
-  } else if (isApModeActive) {
-    // Mode AP Hotspot Captive Portal: Kedip Santai (500ms) Menandakan Menunggu Setup HP
-    if (currentMillis - lastStatusBlink >= 500) {
-      lastStatusBlink = currentMillis;
-      statusLedState = !statusLedState;
-      digitalWrite(PIN_LED_STATUS, statusLedState ? HIGH : LOW);
-    }
   } else {
-    // Standby Siap Uji (Wi-Fi Normal): Solid ON
+    // Standby: Selalu Solid ON (Tanpa Kedip, karena Wi-Fi bersifat opsional)
     digitalWrite(PIN_LED_STATUS, HIGH);
   }
 
