@@ -2,32 +2,36 @@
 
 /*
   =============================================================================
-  ESP32 FULL EDGE AI WATER CLASSIFIER (WITH COMPLETE PRESET & SENSOR SIMULATOR)
+  ESP32 FULL EDGE AI WATER CLASSIFIER (WITH WI-FI CAPTIVE PORTAL PROVISIONING)
   =============================================================================
-  Pinout sesuai jalur PCB:
-  - 1x LED Status (Biru) : GPIO 33 (D33)
-      * Standby / Siap   : MENYALA TERUS (Solid ON).
-      * Sedang Proses Uji: KEDAP-KEDIP (Blinking 150 ms) selama 30 detik.
-  - 3x LED Hasil Klasifikasi:
-      * Hijau            : GPIO 25 (D25) -> Low (Air Bersih / PDAM)
-      * Kuning           : GPIO 22 (D22) -> Medium (Air Sedang)
-      * Merah            : GPIO 23 (D23) -> High (Air Kotor / Keruh)
-  - 1x Push Button       : GPIO 32 (D32) -> Internal INPUT_PULLUP (kaki lain ke GND)
-  - 2x Sensor Analog     : TDS (GPIO 34) & Turbidity (GPIO 35)
-
-  Fitur HIL Simulator (Intervensi Penuh Low / Medium / High):
-  - Karena sensor fisik sedang rusak/bermasalah, sistem dapat diinjeksi preset
-    kategori langsung dari laptop via Wi-Fi (SET_PRESET:LOW / MEDIUM / HIGH).
-  - ESP32 menyimulasikan data TDS & Turbidity realistis lengkap dengan mikrovibrasi.
-  - Model Random Forest di ESP32 tetap mengolah 8 fitur statistik nyata.
-  - LED Merah, Kuning, Hijau di PCB tetap menyala asli dari hasil inferensi AI!
+  Fitur Baru (Tanpa Hardcode Wi-Fi / Web Captive Portal):
+  1. Boot Otomatis:
+     - ESP32 membaca nama Wi-Fi & Password yang tersimpan di memori Flash (NVS).
+     - Jika belum ada atau gagal konek, ESP32 otomatis meluncurkan Hotspot AP:
+       * Nama Hotspot (SSID): "ESP32_WaterAI"
+       * Password AP        : "12345678"
+  2. Pop-up Captive Portal di HP:
+     - Begitu HP/Laptop terhubung ke Wi-Fi "ESP32_WaterAI", otomatis muncul
+       layar pop-up browser (Captive Portal) seperti Wi-Fi hotel/kafe!
+     - Ada tombol "Pindai Wi-Fi", pilih nama Wi-Fi, masukkan password, lalu klik Simpan.
+     - ESP32 otomatis menyimpan ke memori dan langsung terhubung ke Wi-Fi tersebut!
+  3. Tetap Full Edge AI:
+     - Tombol Uji 30 Detik (D32).
+     - 4 LED Fisik (Merah D23, Kuning D22, Hijau D25, Status Biru D33).
+     - Model Random Forest rf_model.h jalan 100% offline.
+     - TCP Server di Port 8080 untuk streaming & injeksi data ke live_viewer.py.
   =============================================================================
 */
 
 #if defined(ESP32)
   #include <WiFi.h>
+  #include <WebServer.h>
+  #include <DNSServer.h>
+  #include <Preferences.h>
 #elif defined(ESP8266)
   #include <ESP8266WiFi.h>
+  #include <ESP8266WebServer.h>
+  #include <DNSServer.h>
 #endif
 
 #include "rf_model.h" // Model Random Forest Edge AI (5-Second Window)
@@ -63,22 +67,29 @@
 #endif
 
 // =============================================================================
-// KONEKSI WI-FI BACKGROUND & TCP SERVER (PORT 8080)
+// CAPTIVE PORTAL & WI-FI PROVISIONING
 // =============================================================================
-#define ENABLE_BACKGROUND_WIFI true  
+const char *AP_SSID           = "ESP32_WaterAI";
+const char *AP_PASSWORD       = "12345678"; // Password hotspot ESP32
+const byte DNS_PORT           = 53;
+const int SERVER_PORT         = 8080;
 
-const char *WIFI_SSID     = "MyRepublic_C2222847";
-const char *WIFI_PASSWORD = "C2222847";
-const int SERVER_PORT     = 8080;
-
+IPAddress apIP(192, 168, 4, 1);
+DNSServer dnsServer;
+WebServer webServer(80);
 WiFiServer server(SERVER_PORT);
 WiFiClient client;
+Preferences preferences;
+
+bool isApModeActive           = false;
+String savedSsid              = "";
+String savedPassword          = "";
 
 // Variabel Intervensi Nilai Sensor (TDS & Turbidity) via Wi-Fi
-bool overrideSensorActive = true;       // Aktifkan mode intervensi agar AI langsung jalan!
-float injectedTdsPpm      = 85.0;       // Nilai dasar TDS
-float injectedTurbNtu     = 15.0;       // Nilai dasar Turbidity
-String currentPresetName  = "LOW";      // Preset aktif
+bool overrideSensorActive     = true;   // Aktifkan mode intervensi agar AI langsung jalan
+float injectedTdsPpm          = 85.0;   // Nilai dasar TDS
+float injectedTurbNtu         = 15.0;   // Nilai dasar Turbidity
+String currentPresetName      = "LOW";  // Preset aktif
 
 // =============================================================================
 // VARIABEL PENGUJIAN 30 DETIK & BUFFER EDGE AI
@@ -112,6 +123,9 @@ unsigned long lastSampleTime = 0;
 unsigned long sampleId = 0;
 float defaultTemperature = 25.0; // Suhu default air (°C)
 
+// Kondisi normal tombol saat tidak ditekan (auto-learned saat boot)
+int buttonIdleState = HIGH; 
+
 // =============================================================================
 // FUNGSI KENDALI LED HASIL KLASIFIKASI
 // =============================================================================
@@ -129,23 +143,18 @@ void setClassificationLeds(String label) {
     digitalWrite(PIN_LED_YELLOW, LOW);
     digitalWrite(PIN_LED_RED, HIGH);
   } else {
-    // Matikan semua LED hasil saat standby atau reset awal
     digitalWrite(PIN_LED_GREEN, LOW);
     digitalWrite(PIN_LED_YELLOW, LOW);
     digitalWrite(PIN_LED_RED, LOW);
   }
 }
 
-// Kondisi normal tombol saat tidak ditekan (akan dipelajari otomatis saat boot)
-int buttonIdleState = HIGH; 
-
 // =============================================================================
 // FUNGSI CEK PUSH BUTTON (AUTO-LEARNING IDLE STATE & ANTI-RESET TRIGGER)
 // =============================================================================
 bool checkButtonPressed() {
-  // 1. Abaikan transien daya saat 2 detik pertama setelah dicolok kabel/baterai/reset
   if (millis() < 2000) {
-    return false;
+    return false; // Abaikan transien daya 2 detik pertama
   }
 
   static int lastStableState = -1;
@@ -154,41 +163,150 @@ bool checkButtonPressed() {
   static bool hasBeenReleased = true;
   bool pressed = false;
 
-  // Inisialisasi awal saat pertama kali dipanggil setelah 2 detik
   if (lastStableState == -1) {
     lastStableState = digitalRead(PIN_BUTTON);
     lastReadState = lastStableState;
-    buttonIdleState = lastStableState; // Kunci kondisi diam saat boot
+    buttonIdleState = lastStableState;
     return false;
   }
 
   int reading = digitalRead(PIN_BUTTON);
 
-  // Jika kondisi pembacaan berubah (kemungkinan noise / getaran mekanis)
   if (reading != lastReadState) {
     lastDebounceTime = millis();
     lastReadState = reading;
   }
 
-  // Jika kondisi baru sudah stabil selama 30 ms
   if ((millis() - lastDebounceTime) >= 30) {
     if (reading != lastStableState) {
       lastStableState = reading;
-
-      // Trigger HANYA saat tombol ditekan (berubah dari posisi idle)
       if (lastStableState != buttonIdleState) {
         if (hasBeenReleased) {
           pressed = true;
-          hasBeenReleased = false; // Kunci agar tidak trigger berulang kali
+          hasBeenReleased = false;
         }
       } else {
-        // Tombol kembali dilepas ke posisi idle
         hasBeenReleased = true;
       }
     }
   }
 
   return pressed;
+}
+
+// =============================================================================
+// FUNGSI HTML & CAPTIVE PORTAL WEB SERVER
+// =============================================================================
+void handlePortalRoot() {
+  // Pindai daftar Wi-Fi yang tersedia
+  int n = WiFi.scanNetworks();
+  String wifiOptions = "";
+  for (int i = 0; i < n; ++i) {
+    String ssid = WiFi.SSID(i);
+    int rssi = WiFi.RSSI(i);
+    wifiOptions += "<option value='" + ssid + "'>" + ssid + " (" + String(rssi) + " dBm)</option>";
+  }
+
+  String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<title>ESP32 Water AI Setup</title>";
+  html += "<style>";
+  html += "body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 20px; display: flex; justify-content: center; }";
+  html += ".card { background: #1e293b; border: 1px solid #334155; border-radius: 16px; padding: 24px; max-width: 400px; width: 100%; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5); }";
+  html += "h2 { color: #38bdf8; margin-top: 0; text-align: center; }";
+  html += "p { color: #94a3b8; font-size: 14px; text-align: center; }";
+  html += "label { font-size: 13px; font-weight: 600; color: #cbd5e1; display: block; margin-top: 14px; }";
+  html += "select, input[type='text'], input[type='password'] { width: 100%; padding: 12px; margin-top: 6px; border: 1px solid #475569; border-radius: 8px; background: #0f172a; color: #fff; box-sizing: border-box; font-size: 14px; }";
+  html += "input[type='submit'] { width: 100%; background: #0284c7; color: white; border: none; padding: 14px; border-radius: 8px; font-weight: 700; font-size: 15px; margin-top: 24px; cursor: pointer; transition: 0.2s; }";
+  html += "input[type='submit']:hover { background: #0369a1; }";
+  html += ".badge { display: inline-block; background: #0369a1; padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: bold; }";
+  html += "</style></head><body>";
+  html += "<div class='card'>";
+  html += "<h2>🌊 Water AI Setup</h2>";
+  html += "<p>Hubungkan ESP32 ke jaringan Wi-Fi untuk mengaktifkan telemetri & live viewer laptop.</p>";
+  html += "<form method='POST' action='/save'>";
+  
+  html += "<label>PILIH WI-FI TERSEDIA:</label>";
+  html += "<select name='ssid' id='ssid_select' onchange='document.getElementById(\"custom_ssid\").value = this.value;'>";
+  html += "<option value=''>-- Pilih Jaringan Wi-Fi --</option>";
+  html += wifiOptions;
+  html += "</select>";
+
+  html += "<label>ATAU KETIK SSID MANUAL:</label>";
+  html += "<input type='text' id='custom_ssid' name='custom_ssid' placeholder='Nama Wi-Fi...'>";
+
+  html += "<label>PASSWORD WI-FI:</label>";
+  html += "<input type='password' name='password' placeholder='Masukkan password Wi-Fi...'>";
+
+  html += "<input type='submit' value='SIMPAN & SAMBUNGKAN'>";
+  html += "</form>";
+  html += "<div style='text-align:center; margin-top:16px;'><span class='badge'>Edge AI Offline Ready</span></div>";
+  html += "</div></body></html>";
+
+  webServer.send(200, "text/html", html);
+}
+
+void handlePortalSave() {
+  String reqSsid = webServer.arg("custom_ssid");
+  if (reqSsid == "") reqSsid = webServer.arg("ssid");
+  String reqPass = webServer.arg("password");
+
+  if (reqSsid != "") {
+    preferences.begin("wifi_cfg", false);
+    preferences.putString("ssid", reqSsid);
+    preferences.putString("pass", reqPass);
+    preferences.end();
+
+    String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1'>";
+    html += "<style>body{font-family:sans-serif;background:#0f172a;color:#fff;text-align:center;padding:50px 20px;}";
+    html += ".card{background:#1e293b;border-radius:16px;padding:30px;max-width:380px;margin:auto;}h2{color:#38bdf8;}</style></head><body>";
+    html += "<div class='card'><h2>✓ PENGATURAN DISIMPAN!</h2>";
+    html += "<p>ESP32 sedang menghubungkan ke:</p>";
+    html += "<h3>" + reqSsid + "</h3>";
+    html += "<p style='color:#94a3b8;font-size:13px;'>Silakan sambungkan kembali HP/Laptop Anda ke Wi-Fi tersebut.</p></div></body></html>";
+    webServer.send(200, "text/html", html);
+
+    delay(2000);
+    ESP.restart(); // Restart agar langsung terhubung ke Wi-Fi baru dengan bersih!
+  } else {
+    webServer.send(200, "text/html", "SSID Kosong! Silakan kembali dan pilih Wi-Fi.");
+  }
+}
+
+// Redirect otomatis ke Captive Portal untuk Android/iOS/Windows
+void handleCaptiveRedirect() {
+  webServer.sendHeader("Location", String("http://192.168.4.1/"), true);
+  webServer.send(302, "text/plain", "");
+}
+
+void startCaptivePortal() {
+  isApModeActive = true;
+  Serial.println("\n========================================================");
+  Serial.println(" [!] MEMULAI CAPTIVE PORTAL SETUP (ACCESS POINT)");
+  Serial.print(" >>> NAMA WI-FI (SSID) : "); Serial.println(AP_SSID);
+  Serial.print(" >>> PASSWORD          : "); Serial.println(AP_PASSWORD);
+  Serial.print(" >>> IP PORTAL SETUP   : "); Serial.println(apIP);
+  Serial.println(" Sambungkan HP ke Wi-Fi tersebut untuk setup Wi-Fi baru!");
+  Serial.println("========================================================\n");
+
+  WiFi.mode(WIFI_AP);
+  WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+  WiFi.softAP(AP_SSID, AP_PASSWORD);
+
+  // Jalankan DNS Server untuk membajak request agar muncul pop-up
+  dnsServer.start(DNS_PORT, "*", apIP);
+
+  // Web Portal Handlers
+  webServer.on("/", handlePortalRoot);
+  webServer.on("/save", HTTP_POST, handlePortalSave);
+  
+  // Handlers untuk trigger pop-up otomatis di Android, iOS, Windows
+  webServer.on("/generate_204", handlePortalRoot);
+  webServer.on("/gen_204", handlePortalRoot);
+  webServer.on("/hotspot-detect.html", handlePortalRoot);
+  webServer.on("/ncsi.txt", handlePortalRoot);
+  webServer.onNotFound(handleCaptiveRedirect);
+
+  webServer.begin();
 }
 
 // =============================================================================
@@ -200,7 +318,6 @@ void updateEdgeAiWindow(float tds, float turb, unsigned long currentTestElapsed)
   bufferIndex = (bufferIndex + 1) % WINDOW_SIZE;
   if (bufferCount < WINDOW_SIZE) bufferCount++;
 
-  // Jalankan klasifikasi Edge AI setiap kali terkumpul 50 sampel baru
   if (bufferCount == WINDOW_SIZE && (bufferIndex % WINDOW_SIZE == 0)) {
     float tdsMean = 0, tdsMin = 99999, tdsMax = -99999;
     float turbMean = 0, turbMin = 99999, turbMax = -99999;
@@ -217,7 +334,6 @@ void updateEdgeAiWindow(float tds, float turb, unsigned long currentTestElapsed)
     tdsMean /= WINDOW_SIZE;
     turbMean /= WINDOW_SIZE;
 
-    // Hitung Standar Deviasi
     float tdsVar = 0, turbVar = 0;
     for (int i = 0; i < WINDOW_SIZE; i++) {
       tdsVar += (tdsBuffer[i] - tdsMean) * (tdsBuffer[i] - tdsMean);
@@ -226,13 +342,11 @@ void updateEdgeAiWindow(float tds, float turb, unsigned long currentTestElapsed)
     float tdsStd = sqrt(tdsVar / WINDOW_SIZE);
     float turbStd = sqrt(turbVar / WINDOW_SIZE);
 
-    // Array 8 Fitur Statistik untuk Model Random Forest
     float features[8] = {
       tdsMean, tdsStd, tdsMin, tdsMax,
       turbMean, turbStd, turbMin, turbMax
     };
 
-    // Inferensi Edge AI Offline (< 0.2 ms pada ESP32)
     currentAiPrediction = EdgeWaterClassifier::predictLabel(features);
     totalDecisions++;
 
@@ -240,7 +354,6 @@ void updateEdgeAiWindow(float tds, float turb, unsigned long currentTestElapsed)
     else if (currentAiPrediction == "Medium") voteCountMed++;
     else if (currentAiPrediction == "High") voteCountHigh++;
 
-    // Perbarui LED hasil sesuai keputusan sementara 5-detikan
     setClassificationLeds(currentAiPrediction);
 
     int elapsedSec = currentTestElapsed / 1000;
@@ -272,17 +385,8 @@ void setup() {
   
   Serial.println("");
   Serial.println("========================================================");
-  Serial.println("   ESP32 FULL EDGE AI WATER CLASSIFIER (PRESET ENABLED)");
+  Serial.println("   ESP32 EDGE AI CLASSIFIER (CAPTIVE PORTAL ENABLED)");
   Serial.println("========================================================");
-  Serial.println(" Pinout PCB:");
-  Serial.println("   [R]   LED Merah  : GPIO 23 (High / Keruh)");
-  Serial.println("   [Y]   LED Kuning : GPIO 22 (Medium / Sedang)");
-  Serial.println("   [G]   LED Hijau  : GPIO 25 (Low / Bersih)");
-  Serial.println("   [STS] LED Status : GPIO 33 (Biru - Standby Solid / Blink)");
-  Serial.println("   [BTN] Tombol Uji : GPIO 32 (INPUT_PULLUP)");
-  Serial.println("   [TDS] Sensor TDS : GPIO 34 (ADC1)");
-  Serial.println("   [TRB] Sensor Turb: GPIO 35 (ADC1)");
-  Serial.println("--------------------------------------------------------");
 
   pinMode(PIN_LED_RED, OUTPUT);
   pinMode(PIN_LED_YELLOW, OUTPUT);
@@ -290,7 +394,6 @@ void setup() {
   pinMode(PIN_LED_STATUS, OUTPUT);
   pinMode(PIN_BUTTON, INPUT_PULLUP);
 
-  // Status Awal Standby
   digitalWrite(PIN_LED_STATUS, HIGH); // LED Status (Biru) Solid ON
   setClassificationLeds("");          // LED Hasil padam
 
@@ -300,44 +403,80 @@ void setup() {
     pinMode(PIN_TURBIDITY, INPUT);
   #endif
 
-  #if ENABLE_BACKGROUND_WIFI
-    Serial.println("\n[WIFI] Menyiapkan modul Wi-Fi...");
-    WiFi.disconnect(true); // Bersihkan sisa koneksi sebelumnya
-    delay(200);
-    WiFi.mode(WIFI_STA);
-    WiFi.setSleep(false);  // Matikan power saving agar sinyal Wi-Fi stabil & responsif
-    WiFi.setAutoReconnect(true);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  // 1. Baca Konfigurasi Wi-Fi dari Memori Flash NVS (Non-Volatile Storage)
+  preferences.begin("wifi_cfg", false);
+  savedSsid = preferences.getString("ssid", ""); // Default kosong (TIDAK ADA HARDCODE)
+  savedPassword = preferences.getString("pass", "");
+  preferences.end();
 
-    Serial.print("[WIFI] Menghubungkan ke '");
-    Serial.print(WIFI_SSID);
+  // 2. Fitur Reset Wi-Fi: Jika Tombol Push Button (D32) DITAHAN saat ESP32 dinyalakan (> 2 detik),
+  //    otomatis hapus Wi-Fi lama dan buka Captive Portal Hotspot AP!
+  if (digitalRead(PIN_BUTTON) == LOW) {
+    Serial.println("\n[!] Tombol terdeteksi ditekan saat power-up...");
+    int holdCount = 0;
+    while (digitalRead(PIN_BUTTON) == LOW && holdCount < 30) {
+      delay(100);
+      holdCount++;
+      digitalWrite(PIN_LED_STATUS, (holdCount % 2 == 0) ? HIGH : LOW);
+    }
+    if (holdCount >= 15) { // Ditahan > 1.5 detik
+      Serial.println("\n========================================================");
+      Serial.println(" [RESET] MENGHAPUS WI-FI TERSIMPAN! (FACTORY RESET)");
+      Serial.println("========================================================");
+      preferences.begin("wifi_cfg", false);
+      preferences.clear();
+      preferences.end();
+      savedSsid = "";
+      savedPassword = "";
+      for (int i = 0; i < 6; i++) {
+        digitalWrite(PIN_LED_STATUS, HIGH); delay(80);
+        digitalWrite(PIN_LED_STATUS, LOW); delay(80);
+      }
+      digitalWrite(PIN_LED_STATUS, HIGH);
+    }
+  }
+
+  // 3. Logika Koneksi:
+  //    A. Jika belum pernah setup Wi-Fi (savedSsid kosong) -> Langsung luncurkan Hotspot AP!
+  if (savedSsid == "") {
+    Serial.println("\n[WIFI] Belum ada Wi-Fi yang dikonfigurasi.");
+    startCaptivePortal();
+  } 
+  //    B. Jika sudah pernah disimpan -> Coba konek ke Wi-Fi router tersebut
+  else {
+    Serial.print("[WIFI] Menghubungkan ke Wi-Fi tersimpan: '");
+    Serial.print(savedSsid);
     Serial.print("'");
 
-    // Beri waktu 8 detik saat booting agar langsung terhubung
-    int timeout = 0;
-    while (WiFi.status() != WL_CONNECTED && timeout < 16) {
+    WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
+    WiFi.setAutoReconnect(true);
+    WiFi.begin(savedSsid.c_str(), savedPassword.c_str());
+
+    int retry = 0;
+    while (WiFi.status() != WL_CONNECTED && retry < 16) { // Tunggu ~8 detik
       delay(500);
       Serial.print(".");
-      timeout++;
+      retry++;
     }
 
+    // Jika berhasil konek
     if (WiFi.status() == WL_CONNECTED) {
       Serial.println("\n========================================================");
-      Serial.println(" [OK] BERHASIL TERHUBUNG KE WI-FI RUMAH!");
+      Serial.println(" [OK] BERHASIL TERHUBUNG KE WI-FI!");
       Serial.print(" >>> ALAMAT IP ESP32 : "); Serial.println(WiFi.localIP());
       Serial.println(" >>> PORT TCP        : 8080");
-      Serial.println(" (Gunakan IP di atas untuk live_viewer.py di laptop)");
       Serial.println("========================================================\n");
-    } else {
-      Serial.println("\n[!] Belum terhubung (akan terus mencoba di background).");
-      Serial.println("    Sistem tetap dapat dijalankan secara OFFLINE!\n");
+      server.begin();
+    } 
+    // Jika gagal terhubung (misal router mati/ganti password) -> Luncurkan Hotspot AP!
+    else {
+      Serial.println("\n[!] Gagal terhubung ke Wi-Fi tersimpan.");
+      startCaptivePortal();
     }
+  }
 
-    server.begin();
-  #endif
-
-  Serial.println(">>> SISTEM SIAP! Preset Awal: LOW (TDS 85 PPM, Turb 15 NTU).");
-  Serial.println(">>> Tekan Push Button (D32) di PCB untuk mulai pengujian 30 detik! <<<\n");
+  Serial.println(">>> SISTEM SIAP! Preset: LOW. Tekan Push Button (D32) untuk Mulai Uji 30s! <<<\n");
 }
 
 // =============================================================================
@@ -346,29 +485,13 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
 
-  // 1. Monitor & Auto-Reconnect Wi-Fi di Background
-  #if ENABLE_BACKGROUND_WIFI
-    static unsigned long lastWifiCheck = 0;
-    static bool wifiAnnounced = false;
-
-    if (currentMillis - lastWifiCheck >= 3000) {
-      lastWifiCheck = currentMillis;
-      if (WiFi.status() == WL_CONNECTED) {
-        if (!wifiAnnounced) {
-          wifiAnnounced = true;
-          Serial.println("\n========================================================");
-          Serial.println(" [OK] WI-FI TERHUBUNG!");
-          Serial.print(" >>> ALAMAT IP ESP32 : "); Serial.println(WiFi.localIP());
-          Serial.println(" >>> PORT TCP        : 8080");
-          Serial.println("========================================================\n");
-        }
-      } else {
-        wifiAnnounced = false;
-        WiFi.reconnect();
-      }
-    }
-
-    // Terima Client TCP dari Laptop
+  // A. Jika Sedang Dalam Mode Captive Portal Hotspot AP
+  if (isApModeActive) {
+    dnsServer.processNextRequest();
+    webServer.handleClient();
+  } 
+  // B. Jika Dalam Mode Wi-Fi Normal (STA)
+  else {
     if (server.hasClient()) {
       if (!client || !client.connected()) {
         client = server.available();
@@ -414,13 +537,17 @@ void loop() {
           Serial.print(" | Turb: "); Serial.println(injectedTurbNtu, 1);
         }
       }
+      else if (cmd == "OPEN_PORTAL") {
+        // Perintah manual untuk membuka kembali captive portal
+        startCaptivePortal();
+      }
       else if (cmd == "RESET_SENSOR") {
         overrideSensorActive = false;
         currentPresetName = "HARDWARE";
         Serial.println("\n[SENSOR ASLI] Kembali ke pembacaan pin fisik.");
       }
     }
-  #endif
+  }
 
   // 2. Baca Push Button (D32) untuk Memulai Pengujian 30 Detik
   if (!isTesting && checkButtonPressed()) {
@@ -433,7 +560,7 @@ void loop() {
     voteCountHigh = 0;
     totalDecisions = 0;
     currentAiPrediction = "Testing...";
-    setClassificationLeds(""); // Reset LED hasil
+    setClassificationLeds("");
 
     Serial.println("\n========================================================");
     Serial.println(" [RUN] TOMBOL DITEKAN! PENGUJIAN 30 DETIK DIMULAI!");
@@ -444,12 +571,21 @@ void loop() {
 
   // 3. Kontrol Indikator LED Status (Biru D33)
   if (isTesting) {
+    // Saat Pengujian AI Berlangsung: Berkedip Cepat (150ms)
     if (currentMillis - lastStatusBlink >= BLINK_INTERVAL_MS) {
       lastStatusBlink = currentMillis;
       statusLedState = !statusLedState;
       digitalWrite(PIN_LED_STATUS, statusLedState ? HIGH : LOW);
     }
+  } else if (isApModeActive) {
+    // Mode AP Hotspot Captive Portal: Kedip Santai (500ms) Menandakan Menunggu Setup HP
+    if (currentMillis - lastStatusBlink >= 500) {
+      lastStatusBlink = currentMillis;
+      statusLedState = !statusLedState;
+      digitalWrite(PIN_LED_STATUS, statusLedState ? HIGH : LOW);
+    }
   } else {
+    // Standby Siap Uji (Wi-Fi Normal): Solid ON
     digitalWrite(PIN_LED_STATUS, HIGH);
   }
 
@@ -466,7 +602,6 @@ void loop() {
     float turbidityNtu = 0.0;
 
     if (overrideSensorActive) {
-      // Buat sedikit fluktuasi acak realistis agar statistik std deviasi nyata
       float jitterTds = (float)random(-15, 16) / 10.0;
       float jitterTurb = (float)random(-20, 21) / 10.0;
       tdsPpm = max(5.0f, injectedTdsPpm + jitterTds);
@@ -495,19 +630,14 @@ void loop() {
       if (turbidityNtu < 0) turbidityNtu = 0;
     }
 
-    // C. Jika Sedang Dalam Sesi Pengujian 30 Detik
     if (isTesting) {
       unsigned long elapsedTestTime = currentMillis - testStartTime;
-
-      // Update Ring Buffer & Jalankan Inferensi Edge AI setiap 5 detik
       updateEdgeAiWindow(tdsPpm, turbidityNtu, elapsedTestTime);
 
-      // Cek apakah 30 detik sudah tercapai
       if (elapsedTestTime >= TEST_DURATION_MS) {
         isTesting = false;
-        digitalWrite(PIN_LED_STATUS, HIGH); // LED Status (Biru) kembali solid ON
+        digitalWrite(PIN_LED_STATUS, HIGH);
 
-        // Tentukan Hasil Akhir berdasarkan Suara Terbanyak (Majority Vote)
         String finalVerdict = "Low";
         if (voteCountHigh >= voteCountMed && voteCountHigh >= voteCountLow && voteCountHigh > 0) {
           finalVerdict = "High";
@@ -520,8 +650,6 @@ void loop() {
         }
 
         currentAiPrediction = finalVerdict;
-        
-        // KUNCI LED HASIL AKHIR AGAR TETAP MENYALA
         setClassificationLeds(finalVerdict);
 
         Serial.println("\n========================================================");
@@ -538,34 +666,36 @@ void loop() {
       }
     }
 
-    // D. Stream Data JSON ke Laptop via Wi-Fi (live_viewer.py)
-    #if ENABLE_BACKGROUND_WIFI
-      if (client && client.connected()) {
-        int elapsedSec = isTesting ? (int)((currentMillis - testStartTime) / 1000) : 0;
-        String jsonData = "{";
-        jsonData += "\"sample_id\":" + String(sampleId) + ",";
-        jsonData += "\"esp_timestamp_ms\":" + String(currentMillis) + ",";
-        jsonData += "\"is_testing\":" + String(isTesting ? "true" : "false") + ",";
-        jsonData += "\"test_elapsed_sec\":" + String(elapsedSec) + ",";
-        jsonData += "\"preset\":\"" + currentPresetName + "\",";
-        jsonData += "\"tds_raw\":" + String(tdsRaw) + ",";
-        jsonData += "\"tds_voltage\":" + String(tdsVoltage, 3) + ",";
-        jsonData += "\"tds_ppm\":" + String(tdsPpm, 1) + ",";
-        jsonData += "\"turbidity_raw\":" + String(turbidityRaw) + ",";
-        jsonData += "\"turbidity_voltage\":" + String(turbidityVoltage, 3) + ",";
-        jsonData += "\"turbidity_ntu\":" + String(turbidityNtu, 1) + ",";
-        jsonData += "\"edge_ai_class\":\"" + currentAiPrediction + "\"";
-        jsonData += "}\n";
-        client.print(jsonData);
-      }
-    #endif
+    // Stream JSON ke Client Laptop
+    if (!isApModeActive && client && client.connected()) {
+      int elapsedSec = isTesting ? (int)((currentMillis - testStartTime) / 1000) : 0;
+      String jsonData = "{";
+      jsonData += "\"sample_id\":" + String(sampleId) + ",";
+      jsonData += "\"esp_timestamp_ms\":" + String(currentMillis) + ",";
+      jsonData += "\"is_testing\":" + String(isTesting ? "true" : "false") + ",";
+      jsonData += "\"test_elapsed_sec\":" + String(elapsedSec) + ",";
+      jsonData += "\"preset\":\"" + currentPresetName + "\",";
+      jsonData += "\"tds_raw\":" + String(tdsRaw) + ",";
+      jsonData += "\"tds_voltage\":" + String(tdsVoltage, 3) + ",";
+      jsonData += "\"tds_ppm\":" + String(tdsPpm, 1) + ",";
+      jsonData += "\"turbidity_raw\":" + String(turbidityRaw) + ",";
+      jsonData += "\"turbidity_voltage\":" + String(turbidityVoltage, 3) + ",";
+      jsonData += "\"turbidity_ntu\":" + String(turbidityNtu, 1) + ",";
+      jsonData += "\"edge_ai_class\":\"" + currentAiPrediction + "\"";
+      jsonData += "}\n";
+      client.print(jsonData);
+    }
 
-    // E. Monitor Pembacaan Serial saat Standby (Setiap 1 Detik)
+    // Serial monitor
     if (!isTesting && (sampleId % 10 == 0)) {
-      Serial.print("[STANDBY - "); Serial.print(currentPresetName); Serial.print("] ");
-      Serial.print("TDS: "); Serial.print(tdsPpm, 1); Serial.print(" PPM | ");
-      Serial.print("Turb: "); Serial.print(turbidityNtu, 1); Serial.print(" NTU | ");
-      Serial.println("Siap Uji 30s!");
+      if (isApModeActive) {
+        Serial.println("[HOTSPOT AP SETUP AKTIF] Sambungkan HP ke 'ESP32_WaterAI' (PW: 12345678)!");
+      } else {
+        Serial.print("[STANDBY - "); Serial.print(currentPresetName); Serial.print("] ");
+        Serial.print("TDS: "); Serial.print(tdsPpm, 1); Serial.print(" PPM | ");
+        Serial.print("Turb: "); Serial.print(turbidityNtu, 1); Serial.print(" NTU | ");
+        Serial.println("Siap Uji 30s!");
+      }
     }
   }
 }
