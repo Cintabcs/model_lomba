@@ -2,7 +2,7 @@
 
 /*
   =============================================================================
-  ESP32 FULL EDGE AI WATER QUALITY CLASSIFIER (OFFLINE-FIRST 30s SYSTEM)
+  ESP32 FULL EDGE AI WATER QUALITY CLASSIFIER (WITH WI-FI TDS INTERVENTION)
   =============================================================================
   Pinout sesuai jalur PCB:
   - 1x LED Status (Biru) : GPIO 33 (D33)
@@ -15,17 +15,12 @@
   - 1x Push Button       : GPIO 32 (D32) -> Internal INPUT_PULLUP (kaki lain ke GND)
   - 2x Sensor Analog     : TDS (GPIO 34) & Turbidity (GPIO 35)
 
-  Arsitektur Edge AI (100% Offline-First):
-  1. Boot instan (< 100 ms), tidak pernah macet menunggu Wi-Fi / internet.
-  2. Begitu alat nyala: LED Status (Biru D33) langsung MENYALA SOLID (Standby Siap).
-  3. Saat tombol ditekan:
-     - LED Status (D33) kedap-kedip selama 30 detik pengujian.
-     - Setiap 5 detik (50 sampel @ 10 Hz), model Random Forest (rf_model.h)
-       mengekstrak 8 fitur statistik dan mengambil keputusan klasifikasi.
-     - LED Hasil (Hijau/Kuning/Merah) menyala realtime sesuai kondisi air.
-  4. Setelah 30 detik selesai:
-     - LED Status (D33) kembali MENYALA SOLID.
-     - LED Hasil akhir terkunci menyala berdasarkan suara terbanyak (majority vote).
+  Fitur Cerdas (HIL / TDS Intervention via Wi-Fi):
+  - Jika sensor TDS fisik rusak (terbaca 0), laptop via script Python dapat
+    menyuntikkan nilai TDS (Low / Medium / High) melalui Wi-Fi TCP (Port 8080).
+  - Sensor Turbidity TETAP MEMBACA CAIRAN FISIK ASLI dari probe D35.
+  - Model Random Forest di ESP32 tetap mengolah 8 fitur dan mengambil keputusan.
+  - LED Merah, Kuning, Hijau di PCB tetap menyala asli dari hasil inferensi AI!
   =============================================================================
 */
 
@@ -69,7 +64,7 @@
 #endif
 
 // =============================================================================
-// OPSIONAL: KONEKSI WI-FI BACKGROUND (TIDAK MEMBLOKIR BOOT / SISTEM)
+// KONEKSI WI-FI BACKGROUND & TCP SERVER (PORT 8080)
 // =============================================================================
 #define ENABLE_BACKGROUND_WIFI true  
 
@@ -79,6 +74,10 @@ const int SERVER_PORT     = 8080;
 
 WiFiServer server(SERVER_PORT);
 WiFiClient client;
+
+// Variabel Intervensi TDS dari Laptop via Wi-Fi
+bool overrideTdsActive = false;
+float injectedTdsPpm   = 85.0; // Default preset Low
 
 // =============================================================================
 // VARIABEL PENGUJIAN 30 DETIK & BUFFER EDGE AI
@@ -110,7 +109,7 @@ int totalDecisions = 0;
 const unsigned long SAMPLE_INTERVAL_MS = 100;
 unsigned long lastSampleTime = 0;
 unsigned long sampleId = 0;
-float defaultTemperature = 25.0; // Suhu default air (derajat Celcius)
+float defaultTemperature = 25.0; // Suhu default air (°C)
 
 // =============================================================================
 // FUNGSI KENDALI LED HASIL KLASIFIKASI
@@ -273,7 +272,7 @@ void setup() {
   #endif
 
   #if ENABLE_BACKGROUND_WIFI
-    // Mulai Wi-Fi secara NON-BLOCKING (background, tidak menahan jalannya alat)
+    // Mulai Wi-Fi secara NON-BLOCKING (background)
     Serial.print("[WIFI] Inisialisasi Wi-Fi: ");
     Serial.println(WIFI_SSID);
     WiFi.mode(WIFI_STA);
@@ -291,10 +290,28 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
 
-  // 1. Terima Client Wi-Fi (Jika Ada Laptop Terkoneksi)
+  // 1. Terima Perintah & Suntikan Data dari Laptop via Wi-Fi
   #if ENABLE_BACKGROUND_WIFI
     if (!client || !client.connected()) {
       client = server.available();
+    } else {
+      while (client.available()) {
+        String cmd = client.readStringUntil('\n');
+        cmd.trim();
+        if (cmd.startsWith("SET_TDS:")) {
+          float val = cmd.substring(8).toFloat();
+          if (val >= 0) {
+            overrideTdsActive = true;
+            injectedTdsPpm = val;
+            Serial.print("[INTERVENSI WI-FI] Nilai TDS Berhasil Disuntikkan: ");
+            Serial.print(injectedTdsPpm, 1);
+            Serial.println(" PPM");
+          }
+        } else if (cmd == "RESET_TDS") {
+          overrideTdsActive = false;
+          Serial.println("[INTERVENSI WI-FI] Injeksi dimatikan (kembali ke sensor TDS fisik).");
+        }
+      }
     }
   #endif
 
@@ -335,17 +352,27 @@ void loop() {
     lastSampleTime = currentMillis;
     sampleId++;
 
-    // A. Baca Sensor TDS (GPIO 34)
-    int tdsRaw = analogRead(PIN_TDS);
-    float tdsVoltage = tdsRaw * (VREF / ADC_RESOLUTION);
-    float compCoeff = 1.0 + 0.02 * (defaultTemperature - 25.0);
-    float compVolt = tdsVoltage / compCoeff;
-    float tdsPpm = (133.42 * compVolt * compVolt * compVolt 
-                    - 255.86 * compVolt * compVolt 
-                    + 857.39 * compVolt) * 0.5;
-    if (tdsPpm < 0) tdsPpm = 0;
+    // A. Nilai Sensor TDS (Bisa dari Injeksi Laptop atau Sensor Fisik)
+    int tdsRaw = 0;
+    float tdsVoltage = 0.0;
+    float tdsPpm = 0.0;
 
-    // B. Baca Sensor Turbidity (GPIO 35)
+    if (overrideTdsActive) {
+      tdsPpm = injectedTdsPpm;
+      tdsVoltage = (tdsPpm / 500.0) * 1.5; // Estimasi voltase representatif
+      tdsRaw = (int)(tdsVoltage * (ADC_RESOLUTION / VREF));
+    } else {
+      tdsRaw = analogRead(PIN_TDS);
+      tdsVoltage = tdsRaw * (VREF / ADC_RESOLUTION);
+      float compCoeff = 1.0 + 0.02 * (defaultTemperature - 25.0);
+      float compVolt = tdsVoltage / compCoeff;
+      tdsPpm = (133.42 * compVolt * compVolt * compVolt 
+                      - 255.86 * compVolt * compVolt 
+                      + 857.39 * compVolt) * 0.5;
+      if (tdsPpm < 0) tdsPpm = 0;
+    }
+
+    // B. Baca Sensor Turbidity Fisik Asli (GPIO 35)
     int turbidityRaw = analogRead(PIN_TURBIDITY);
     float turbidityVoltage = turbidityRaw * (VREF / ADC_RESOLUTION);
     float turbidityNtu = 0;
@@ -399,13 +426,16 @@ void loop() {
       }
     }
 
-    // D. Stream Data JSON jika terhubung ke Wi-Fi (live_viewer.py)
+    // D. Stream Data JSON ke Laptop via Wi-Fi (live_viewer.py)
     #if ENABLE_BACKGROUND_WIFI
       if (client && client.connected()) {
+        int elapsedSec = isTesting ? (int)((currentMillis - testStartTime) / 1000) : 0;
         String jsonData = "{";
         jsonData += "\"sample_id\":" + String(sampleId) + ",";
         jsonData += "\"esp_timestamp_ms\":" + String(currentMillis) + ",";
         jsonData += "\"is_testing\":" + String(isTesting ? "true" : "false") + ",";
+        jsonData += "\"test_elapsed_sec\":" + String(elapsedSec) + ",";
+        jsonData += "\"override_active\":" + String(overrideTdsActive ? "true" : "false") + ",";
         jsonData += "\"tds_raw\":" + String(tdsRaw) + ",";
         jsonData += "\"tds_voltage\":" + String(tdsVoltage, 3) + ",";
         jsonData += "\"tds_ppm\":" + String(tdsPpm, 1) + ",";
@@ -420,8 +450,12 @@ void loop() {
 
     // E. Monitor Pembacaan Serial saat Standby (Setiap 1 Detik)
     if (!isTesting && (sampleId % 10 == 0)) {
-      Serial.print("[STANDBY] TDS: "); Serial.print(tdsPpm, 1);
-      Serial.print(" PPM | Turb: "); Serial.print(turbidityNtu, 1);
+      Serial.print("[STANDBY] TDS: ");
+      Serial.print(tdsPpm, 1);
+      if (overrideTdsActive) Serial.print(" PPM (INJEKSI LAPTOP)");
+      else Serial.print(" PPM (SENSOR)");
+      Serial.print(" | Turb: ");
+      Serial.print(turbidityNtu, 1);
       Serial.println(" NTU | Tekan Push Button (D32) untuk Mulai Uji 30s");
     }
   }
