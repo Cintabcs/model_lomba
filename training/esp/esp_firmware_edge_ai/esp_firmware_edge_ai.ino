@@ -589,54 +589,59 @@ void loop() {
     digitalWrite(PIN_LED_STATUS, HIGH);
   }
 
-  // 4. Siklus Sampling Sensor 10 Hz (Setiap 100 ms)
-  if (currentMillis - lastSampleTime >= SAMPLE_INTERVAL_MS) {
-    lastSampleTime = currentMillis;
-    sampleId++;
+  // 4. Mode Hemat Data & Daya:
+  //    Akusisi data sensor (10 Hz) dan streaming data PENUH HANYA berjalan
+  //    ketika tombol push button ditekan & pengujian 30 detik sedang aktif!
+  if (isTesting) {
+    if (currentMillis - lastSampleTime >= SAMPLE_INTERVAL_MS) {
+      lastSampleTime = currentMillis;
+      sampleId++;
 
-    int tdsRaw = 0;
-    float tdsVoltage = 0.0;
-    float tdsPpm = 0.0;
-    int turbidityRaw = 0;
-    float turbidityVoltage = 0.0;
-    float turbidityNtu = 0.0;
+      int tdsRaw = 0;
+      float tdsVoltage = 0.0;
+      float tdsPpm = 0.0;
+      int turbidityRaw = 0;
+      float turbidityVoltage = 0.0;
+      float turbidityNtu = 0.0;
 
-    if (overrideSensorActive) {
-      float jitterTds = (float)random(-15, 16) / 10.0;
-      float jitterTurb = (float)random(-20, 21) / 10.0;
-      tdsPpm = max(5.0f, injectedTdsPpm + jitterTds);
-      turbidityNtu = max(0.0f, injectedTurbNtu + jitterTurb);
-      tdsVoltage = (tdsPpm / 500.0) * 1.5;
-      tdsRaw = (int)(tdsVoltage * (ADC_RESOLUTION / VREF));
-      turbidityVoltage = max(0.2f, 2.4f - (turbidityNtu * 1.4f / 500.0f));
-      turbidityRaw = (int)(turbidityVoltage * (ADC_RESOLUTION / VREF));
-    } else {
-      tdsRaw = analogRead(PIN_TDS);
-      tdsVoltage = tdsRaw * (VREF / ADC_RESOLUTION);
-      float compCoeff = 1.0 + 0.02 * (defaultTemperature - 25.0);
-      float compVolt = tdsVoltage / compCoeff;
-      tdsPpm = (133.42 * compVolt * compVolt * compVolt 
-                      - 255.86 * compVolt * compVolt 
-                      + 857.39 * compVolt) * 0.5;
-      if (tdsPpm < 0) tdsPpm = 0;
-
-      turbidityRaw = analogRead(PIN_TURBIDITY);
-      turbidityVoltage = turbidityRaw * (VREF / ADC_RESOLUTION);
-      if (turbidityVoltage >= 2.4) {
-        turbidityNtu = 0.0;
+      // Baca Data Sensor (Simulasi Intervensi / ADC Fisik)
+      if (overrideSensorActive) {
+        float jitterTds = (float)random(-15, 16) / 10.0;
+        float jitterTurb = (float)random(-20, 21) / 10.0;
+        tdsPpm = max(5.0f, injectedTdsPpm + jitterTds);
+        turbidityNtu = max(0.0f, injectedTurbNtu + jitterTurb);
+        tdsVoltage = (tdsPpm / 500.0) * 1.5;
+        tdsRaw = (int)(tdsVoltage * (ADC_RESOLUTION / VREF));
+        turbidityVoltage = max(0.2f, 2.4f - (turbidityNtu * 1.4f / 500.0f));
+        turbidityRaw = (int)(turbidityVoltage * (ADC_RESOLUTION / VREF));
       } else {
-        turbidityNtu = (2.4 - turbidityVoltage) * (500.0 / 1.4);
-      }
-      if (turbidityNtu < 0) turbidityNtu = 0;
-    }
+        tdsRaw = analogRead(PIN_TDS);
+        tdsVoltage = tdsRaw * (VREF / ADC_RESOLUTION);
+        float compCoeff = 1.0 + 0.02 * (defaultTemperature - 25.0);
+        float compVolt = tdsVoltage / compCoeff;
+        tdsPpm = (133.42 * compVolt * compVolt * compVolt 
+                        - 255.86 * compVolt * compVolt 
+                        + 857.39 * compVolt) * 0.5;
+        if (tdsPpm < 0) tdsPpm = 0;
 
-    if (isTesting) {
+        turbidityRaw = analogRead(PIN_TURBIDITY);
+        turbidityVoltage = turbidityRaw * (VREF / ADC_RESOLUTION);
+        if (turbidityVoltage >= 2.4) {
+          turbidityNtu = 0.0;
+        } else {
+          turbidityNtu = (2.4 - turbidityVoltage) * (500.0 / 1.4);
+        }
+        if (turbidityNtu < 0) turbidityNtu = 0;
+      }
+
+      // Update Ring Buffer & Inferensi Edge AI setiap 5 detik
       unsigned long elapsedTestTime = currentMillis - testStartTime;
       updateEdgeAiWindow(tdsPpm, turbidityNtu, elapsedTestTime);
 
+      // Cek apakah 30 detik pengujian sudah selesai
       if (elapsedTestTime >= TEST_DURATION_MS) {
         isTesting = false;
-        digitalWrite(PIN_LED_STATUS, HIGH);
+        digitalWrite(PIN_LED_STATUS, HIGH); // LED Status kembali solid ON
 
         String finalVerdict = "Low";
         if (voteCountHigh >= voteCountMed && voteCountHigh >= voteCountLow && voteCountHigh > 0) {
@@ -650,7 +655,7 @@ void loop() {
         }
 
         currentAiPrediction = finalVerdict;
-        setClassificationLeds(finalVerdict);
+        setClassificationLeds(finalVerdict); // Kunci LED hasil akhir
 
         Serial.println("\n========================================================");
         Serial.println(" [OK] PENGUJIAN 30 DETIK SELESAI!");
@@ -659,42 +664,48 @@ void loop() {
         Serial.print(" Rincian Voting 5-Detikan             : Low="); Serial.print(voteCountLow);
         Serial.print(" | Medium="); Serial.print(voteCountMed);
         Serial.print(" | High="); Serial.println(voteCountHigh);
-        Serial.println(" Status LED: LED Status (Biru D33) Solid ON.");
-        Serial.println(" LED Hasil Klasifikasi Tetap Menyala.");
+        Serial.println(" Sensor dimatikan kembali ke mode hemat daya.");
         Serial.println(" Tekan Push Button untuk memulai pengujian baru.");
         Serial.println("========================================================\n");
       }
-    }
 
-    // Stream JSON ke Client Laptop
-    if (!isApModeActive && client && client.connected()) {
-      int elapsedSec = isTesting ? (int)((currentMillis - testStartTime) / 1000) : 0;
-      String jsonData = "{";
-      jsonData += "\"sample_id\":" + String(sampleId) + ",";
-      jsonData += "\"esp_timestamp_ms\":" + String(currentMillis) + ",";
-      jsonData += "\"is_testing\":" + String(isTesting ? "true" : "false") + ",";
-      jsonData += "\"test_elapsed_sec\":" + String(elapsedSec) + ",";
-      jsonData += "\"preset\":\"" + currentPresetName + "\",";
-      jsonData += "\"tds_raw\":" + String(tdsRaw) + ",";
-      jsonData += "\"tds_voltage\":" + String(tdsVoltage, 3) + ",";
-      jsonData += "\"tds_ppm\":" + String(tdsPpm, 1) + ",";
-      jsonData += "\"turbidity_raw\":" + String(turbidityRaw) + ",";
-      jsonData += "\"turbidity_voltage\":" + String(turbidityVoltage, 3) + ",";
-      jsonData += "\"turbidity_ntu\":" + String(turbidityNtu, 1) + ",";
-      jsonData += "\"edge_ai_class\":\"" + currentAiPrediction + "\"";
-      jsonData += "}\n";
-      client.print(jsonData);
+      // Stream JSON Telemetri Penuh ke Laptop saat Uji 30s Aktif
+      if (!isApModeActive && client && client.connected()) {
+        int elapsedSec = (int)((currentMillis - testStartTime) / 1000);
+        String jsonData = "{";
+        jsonData += "\"sample_id\":" + String(sampleId) + ",";
+        jsonData += "\"esp_timestamp_ms\":" + String(currentMillis) + ",";
+        jsonData += "\"is_testing\":" + String(isTesting ? "true" : "false") + ",";
+        jsonData += "\"test_elapsed_sec\":" + String(elapsedSec) + ",";
+        jsonData += "\"preset\":\"" + currentPresetName + "\",";
+        jsonData += "\"tds_raw\":" + String(tdsRaw) + ",";
+        jsonData += "\"tds_voltage\":" + String(tdsVoltage, 3) + ",";
+        jsonData += "\"tds_ppm\":" + String(tdsPpm, 1) + ",";
+        jsonData += "\"turbidity_raw\":" + String(turbidityRaw) + ",";
+        jsonData += "\"turbidity_voltage\":" + String(turbidityVoltage, 3) + ",";
+        jsonData += "\"turbidity_ntu\":" + String(turbidityNtu, 1) + ",";
+        jsonData += "\"edge_ai_class\":\"" + currentAiPrediction + "\"";
+        jsonData += "}\n";
+        client.print(jsonData);
+      }
     }
+  } 
+  // 5. Saat Standby: Sensor TIDAK dibaca & Wi-Fi hanya kirim status hemat (Heartbeat 1 Hz)
+  else {
+    static unsigned long lastHeartbeatTime = 0;
+    if (currentMillis - lastHeartbeatTime >= 1000) { // Cukup 1 detik sekali
+      lastHeartbeatTime = currentMillis;
 
-    // Serial monitor
-    if (!isTesting && (sampleId % 10 == 0)) {
+      if (!isApModeActive && client && client.connected()) {
+        String hb = "{\"is_testing\":false,\"preset\":\"" + currentPresetName + "\",\"edge_ai_class\":\"" + currentAiPrediction + "\"}\n";
+        client.print(hb);
+      }
+
       if (isApModeActive) {
-        Serial.println("[HOTSPOT AP SETUP AKTIF] Sambungkan HP ke 'ESP32_WaterAI' (PW: 12345678)!");
+        Serial.println("[HOTSPOT AP SETUP] Sambungkan HP ke 'ESP32_WaterAI' (PW: 12345678)!");
       } else {
-        Serial.print("[STANDBY - "); Serial.print(currentPresetName); Serial.print("] ");
-        Serial.print("TDS: "); Serial.print(tdsPpm, 1); Serial.print(" PPM | ");
-        Serial.print("Turb: "); Serial.print(turbidityNtu, 1); Serial.print(" NTU | ");
-        Serial.println("Siap Uji 30s!");
+        Serial.print("[STANDBY - "); Serial.print(currentPresetName);
+        Serial.println("] Sensor OFF. Tekan Tombol (D32) untuk Mulai Uji 30s!");
       }
     }
   }
