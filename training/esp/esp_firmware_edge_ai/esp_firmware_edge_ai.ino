@@ -66,11 +66,12 @@ int voteCountHigh             = 0;
 int totalDecisions            = 0;
 
 // Sampling Sensor
-unsigned long lastSampleTime  = 0;
-unsigned long sampleId        = 0;
-float defaultTemperature      = 25.0f;
-int buttonIdleState           = HIGH;
-unsigned long buttonArmTime   = 0; // Waktu proteksi startup tombol
+unsigned long lastSampleTime     = 0;
+unsigned long sampleId           = 0;
+float defaultTemperature         = 25.0f;
+int buttonIdleState              = HIGH;
+unsigned long buttonArmTime      = 0; // Waktu proteksi startup tombol
+unsigned long resultLedTurnOffTime = 0; // Timer 10 detik mati otomatis LED hasil
 
 // =============================================================================
 // KENDALI LED HASIL KLASIFIKASI
@@ -96,7 +97,7 @@ void setClassificationLeds(String label) {
 }
 
 // =============================================================================
-// DETEKSI PUSH BUTTON (ANTI AUTO-TRIGGER BOOT & SINGLE-PRESS INSTANT)
+// DETEKSI PUSH BUTTON (ANTI NOISE GLITCH 80ms & SINGLE-PRESS INSTANT)
 // =============================================================================
 bool checkButtonPressed() {
   static int lastPhysicalReading = -1;
@@ -122,8 +123,8 @@ bool checkButtonPressed() {
     lastPhysicalReading = currentReading;
   }
 
-  // Jika sinyal stabil selama minimal 40 ms
-  if ((millis() - lastDebounceMs) >= 40) {
+  // Filter Noise: Sinyal harus stabil selama minimal 80 ms (mencegah glitch RF/ESD)
+  if ((millis() - lastDebounceMs) >= 80) {
     if (currentReading != stableReading) {
       stableReading = currentReading;
 
@@ -365,11 +366,12 @@ void handleTcpCommunication() {
 }
 
 // =============================================================================
-// MODUL SESI PENGUJIAN 30 DETIK (START & FINISH)
+// MODUL SESI PENGUJIAN 30 DETIK (START, FINISH, CANCEL)
 // =============================================================================
 void startTestingSession(unsigned long currentMillis) {
   isTesting = true;
   testStartTime = currentMillis;
+  resultLedTurnOffTime = 0; // Reset timer padam LED hasil
   bufferIndex = 0;
   bufferCount = 0;
   voteCountLow = 0;
@@ -383,7 +385,27 @@ void startTestingSession(unsigned long currentMillis) {
   Serial.println(" [RUN] TOMBOL DITEKAN! PENGUJIAN 30 DETIK DIMULAI!");
   Serial.print(" Preset Aktif: "); Serial.println(currentPresetName);
   Serial.println(" LED Status (Biru D33) Berkedip Cepat (Proses Edge AI)...");
+  Serial.println(" (Tekan tombol sekali lagi jika ingin membatalkan)");
   Serial.println("========================================================");
+}
+
+void cancelTestingSession() {
+  isTesting = false;
+  digitalWrite(PIN_LED_STATUS, HIGH); // LED Status kembali Solid ON
+  setClassificationLeds("");          // Padamkan LED hasil seketika
+  resultLedTurnOffTime = 0;
+  currentAiPrediction = "Cancelled";
+
+  Serial.println("\n========================================================");
+  Serial.println(" [CANCEL] PENGUJIAN 30 DETIK DIBATALKAN PENGGUNA!");
+  Serial.println(" LED Status (Biru D33) Kembali Solid ON.");
+  Serial.println(" Sensor dimatikan & sistem kembali ke mode Standby.");
+  Serial.println("========================================================\n");
+
+  if (!isApModeActive && client && client.connected()) {
+    String cancelJson = "{\"is_testing\":false,\"cancelled\":true,\"edge_ai_class\":\"Cancelled\"}\n";
+    client.print(cancelJson);
+  }
 }
 
 void finishTestingSession() {
@@ -402,7 +424,8 @@ void finishTestingSession() {
   }
 
   currentAiPrediction = finalVerdict;
-  setClassificationLeds(finalVerdict); // Kunci LED hasil akhir
+  setClassificationLeds(finalVerdict); // Nyalakan LED hasil
+  resultLedTurnOffTime = millis() + 10000; // Pasang timer: Padam otomatis setelah 10 detik!
 
   Serial.println("\n========================================================");
   Serial.println(" [OK] PENGUJIAN 30 DETIK SELESAI!");
@@ -411,7 +434,7 @@ void finishTestingSession() {
   Serial.print(" Rincian Voting 5-Detikan             : Low="); Serial.print(voteCountLow);
   Serial.print(" | Medium="); Serial.print(voteCountMed);
   Serial.print(" | High="); Serial.println(voteCountHigh);
-  Serial.println(" Sensor dimatikan kembali ke mode hemat daya.");
+  Serial.println(" [TIMER] LED hasil menyala selama 10 detik, lalu padam otomatis.");
   Serial.println(" Tekan Push Button untuk memulai pengujian baru.");
   Serial.println("========================================================\n");
 }
@@ -600,12 +623,23 @@ void loop() {
     handleTcpCommunication();
   }
 
-  // 2. Baca Push Button untuk Memulai Uji 30 Detik
-  if (!isTesting && checkButtonPressed()) {
-    startTestingSession(currentMillis);
+  // 2. Baca Push Button (Toggle: Mulai Uji atau Batalkan Uji)
+  if (checkButtonPressed()) {
+    if (!isTesting) {
+      startTestingSession(currentMillis);
+    } else {
+      cancelTestingSession();
+    }
   }
 
-  // 3. Kontrol Indikator LED Status (Biru D33)
+  // 3. Matikan LED Hasil Klasifikasi Otomatis Setelah 10 Detik
+  if (!isTesting && (resultLedTurnOffTime > 0) && (currentMillis >= resultLedTurnOffTime)) {
+    resultLedTurnOffTime = 0;
+    setClassificationLeds("");
+    Serial.println("[TIMER] 10 detik selesai. LED hasil klasifikasi dimatikan otomatis.");
+  }
+
+  // 4. Kontrol Indikator LED Status (Biru D33)
   if (isTesting) {
     if (currentMillis - lastStatusBlink >= BLINK_INTERVAL_MS) {
       lastStatusBlink = currentMillis;
@@ -616,7 +650,7 @@ void loop() {
     digitalWrite(PIN_LED_STATUS, HIGH); // Standby selalu Solid ON
   }
 
-  // 4. Siklus Pengujian / Standby Hemat Daya
+  // 5. Siklus Pengujian / Standby Hemat Daya
   if (isTesting) {
     processTestingCycle(currentMillis);
   } else {
