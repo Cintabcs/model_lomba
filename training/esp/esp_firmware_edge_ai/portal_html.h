@@ -94,10 +94,27 @@ inline String generatePortalRootHtml(const String &savedSsid) {
   html += "    <input type='text' id='ssid_input' name='ssid' value='" + savedSsid + "' placeholder='Pilih dari daftar atau ketik manual...' required>";
 
   html += "    <label>PASSWORD WI-FI:</label>";
-  html += "    <input type='password' id='password_input' name='password' placeholder='Masukkan password Wi-Fi...'>";
+  html += "    <div style='position:relative; display:flex; align-items:center;'>";
+  html += "      <input type='password' id='password_input' name='password' placeholder='Masukkan password Wi-Fi...' style='padding-right:45px;'>";
+  html += "      <button type='button' id='eye_btn' onclick='togglePassword()' style='position:absolute; right:10px; background:none; border:none; color:#94a3b8; cursor:pointer; font-size:18px; padding:4px; outline:none;'>👁️</button>";
+  html += "    </div>";
 
   html += "    <input type='submit' value='⚡ HUBUNGKAN ESP32 KE WI-FI'>";
   html += "  </form>";
+
+  html += "<script>";
+  html += "function togglePassword() {";
+  html += "  var pw = document.getElementById('password_input');";
+  html += "  var btn = document.getElementById('eye_btn');";
+  html += "  if (pw.type === 'password') {";
+  html += "    pw.type = 'text';";
+  html += "    btn.innerText = '🙈';";
+  html += "  } else {";
+  html += "    pw.type = 'password';";
+  html += "    btn.innerText = '👁️';";
+  html += "  }";
+  html += "}";
+  html += "</script>";
 
   html += "  <div class='tips'>";
   html += "    💡 <b>Catatan Penting:</b><br>";

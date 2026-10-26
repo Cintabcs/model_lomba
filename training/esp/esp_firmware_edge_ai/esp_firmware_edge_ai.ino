@@ -70,6 +70,7 @@ unsigned long lastSampleTime  = 0;
 unsigned long sampleId        = 0;
 float defaultTemperature      = 25.0f;
 int buttonIdleState           = HIGH;
+unsigned long buttonArmTime   = 0; // Waktu proteksi startup tombol
 
 // =============================================================================
 // KENDALI LED HASIL KLASIFIKASI
@@ -95,44 +96,51 @@ void setClassificationLeds(String label) {
 }
 
 // =============================================================================
-// DETEKSI PUSH BUTTON (DEBOUNCE & ANTI-FALSE TRIGGER)
+// DETEKSI PUSH BUTTON (ANTI AUTO-TRIGGER BOOT & SINGLE-PRESS INSTANT)
 // =============================================================================
 bool checkButtonPressed() {
-  static unsigned long lastDebounceTime = 0;
-  static int lastReadState = HIGH;
-  static int lastStableState = HIGH;
-  static bool hasBeenReleased = true;
-  bool pressed = false;
+  static int lastPhysicalReading = -1;
+  static int stableReading = -1;
+  static unsigned long lastDebounceMs = 0;
+  static bool eventFired = false;
 
-  // Grace period 2 detik awal startup agar tidak auto-trigger saat colok adaptor
-  if (millis() < 2000) {
-    buttonIdleState = digitalRead(PIN_BUTTON);
-    lastReadState = buttonIdleState;
-    lastStableState = buttonIdleState;
+  // 1. Kunci pengaman startup: abaikan pembacaan selama 1.5 detik setelah boot
+  if (millis() < buttonArmTime) {
+    stableReading = digitalRead(PIN_BUTTON);
+    lastPhysicalReading = stableReading;
+    buttonIdleState = stableReading;
+    eventFired = false;
     return false;
   }
 
-  int reading = digitalRead(PIN_BUTTON);
-  if (reading != lastReadState) {
-    lastDebounceTime = millis();
-    lastReadState = reading;
+  // 2. Baca nilai fisik pin tombol saat ini
+  int currentReading = digitalRead(PIN_BUTTON);
+
+  // Jika terdeteksi perubahan logika pin (bouncing)
+  if (currentReading != lastPhysicalReading) {
+    lastDebounceMs = millis();
+    lastPhysicalReading = currentReading;
   }
 
-  if ((millis() - lastDebounceTime) >= 30) {
-    if (reading != lastStableState) {
-      lastStableState = reading;
-      if (lastStableState != buttonIdleState) {
-        if (hasBeenReleased) {
-          pressed = true;
-          hasBeenReleased = false;
+  // Jika sinyal stabil selama minimal 40 ms
+  if ((millis() - lastDebounceMs) >= 40) {
+    if (currentReading != stableReading) {
+      stableReading = currentReading;
+
+      // Apakah tombol sedang DITEKAN (berbeda dari kondisi idle)?
+      if (stableReading != buttonIdleState) {
+        if (!eventFired) {
+          eventFired = true;
+          return true; // TEPAT 1x TRIGGER PADA TEKANAN PERTAMA!
         }
       } else {
-        hasBeenReleased = true;
+        // Tombol telah DILEPAS kembali ke posisi normal
+        eventFired = false;
       }
     }
   }
 
-  return pressed;
+  return false;
 }
 
 // =============================================================================
@@ -569,6 +577,11 @@ void setup() {
       startCaptivePortal();
     }
   }
+
+  // 3. Kalibrasi Baseline Push Button & Pasang Kunci Pengaman Boot
+  delay(100);
+  buttonIdleState = digitalRead(PIN_BUTTON);
+  buttonArmTime = millis() + 1500; // Tombol baru bisa ditekan 1.5 detik setelah siap
 
   Serial.println(">>> SISTEM SIAP! Preset: LOW. Tekan Push Button (D32) untuk Mulai Uji 30s! <<<\n");
 }
