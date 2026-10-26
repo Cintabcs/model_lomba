@@ -301,14 +301,42 @@ void setup() {
   #endif
 
   #if ENABLE_BACKGROUND_WIFI
-    Serial.print("[WIFI] Inisialisasi Wi-Fi: ");
-    Serial.println(WIFI_SSID);
+    Serial.println("\n[WIFI] Menyiapkan modul Wi-Fi...");
+    WiFi.disconnect(true); // Bersihkan sisa koneksi sebelumnya
+    delay(200);
     WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);  // Matikan power saving agar sinyal Wi-Fi stabil & responsif
+    WiFi.setAutoReconnect(true);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+    Serial.print("[WIFI] Menghubungkan ke '");
+    Serial.print(WIFI_SSID);
+    Serial.print("'");
+
+    // Beri waktu 8 detik saat booting agar langsung terhubung
+    int timeout = 0;
+    while (WiFi.status() != WL_CONNECTED && timeout < 16) {
+      delay(500);
+      Serial.print(".");
+      timeout++;
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("\n========================================================");
+      Serial.println(" [OK] BERHASIL TERHUBUNG KE WI-FI RUMAH!");
+      Serial.print(" >>> ALAMAT IP ESP32 : "); Serial.println(WiFi.localIP());
+      Serial.println(" >>> PORT TCP        : 8080");
+      Serial.println(" (Gunakan IP di atas untuk live_viewer.py di laptop)");
+      Serial.println("========================================================\n");
+    } else {
+      Serial.println("\n[!] Belum terhubung (akan terus mencoba di background).");
+      Serial.println("    Sistem tetap dapat dijalankan secara OFFLINE!\n");
+    }
+
     server.begin();
   #endif
 
-  Serial.println("\n>>> SISTEM SIAP! Preset Awal: LOW (TDS 85 PPM, Turb 15 NTU).");
+  Serial.println(">>> SISTEM SIAP! Preset Awal: LOW (TDS 85 PPM, Turb 15 NTU).");
   Serial.println(">>> Tekan Push Button (D32) di PCB untuk mulai pengujian 30 detik! <<<\n");
 }
 
@@ -318,12 +346,33 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
 
-  // 1. Terima Perintah & Suntikan Data dari Laptop via Wi-Fi
+  // 1. Monitor & Auto-Reconnect Wi-Fi di Background
   #if ENABLE_BACKGROUND_WIFI
+    static unsigned long lastWifiCheck = 0;
+    static bool wifiAnnounced = false;
+
+    if (currentMillis - lastWifiCheck >= 3000) {
+      lastWifiCheck = currentMillis;
+      if (WiFi.status() == WL_CONNECTED) {
+        if (!wifiAnnounced) {
+          wifiAnnounced = true;
+          Serial.println("\n========================================================");
+          Serial.println(" [OK] WI-FI TERHUBUNG!");
+          Serial.print(" >>> ALAMAT IP ESP32 : "); Serial.println(WiFi.localIP());
+          Serial.println(" >>> PORT TCP        : 8080");
+          Serial.println("========================================================\n");
+        }
+      } else {
+        wifiAnnounced = false;
+        WiFi.reconnect();
+      }
+    }
+
+    // Terima Client TCP dari Laptop
     if (server.hasClient()) {
       if (!client || !client.connected()) {
         client = server.available();
-        Serial.println("\n[TCP] Client laptop terhubung!");
+        Serial.println("\n[TCP] Client laptop (live_viewer.py) terhubung!");
       }
     }
 
@@ -353,7 +402,6 @@ void loop() {
         Serial.println("\n[PRESET DIUBAH] -> HIGH (TDS ~480 PPM, Turb ~450 NTU)");
       }
       else if (cmd.startsWith("SET_CUSTOM:")) {
-        // Format: SET_CUSTOM:tds_val,turb_val
         int commaIdx = cmd.indexOf(',');
         if (commaIdx > 11) {
           float cTds = cmd.substring(11, commaIdx).toFloat();
