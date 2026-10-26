@@ -1,3 +1,5 @@
+#include <Arduino.h>
+
 /*
   =============================================================================
   ESP32 LED & PUSH BUTTON HARDWARE TESTER (10-SECOND PARTY ANIMATION)
@@ -10,13 +12,13 @@
   - Push Button : GPIO 32 (D32) -> Internal INPUT_PULLUP (kaki lain ke GND)
 
   Cara Kerja:
-  1. Saat Standby:
+  1. Standby:
      - LED Putih MENYALA TERUS (Solid ON).
      - LED Merah, Kuning, Hijau MATI.
   2. Saat Tombol (D32) Ditekan:
      - Masuk mode pesta 10 Detik!
      - LED Putih kedap-kedip cepat (indikator proses).
-     - LED Merah, Kuning, Hijau joget bergantian (Running Chase & Disco Strobo)!
+     - LED Merah, Kuning, Hijau bergantian (Running Chase & Disco Strobo).
      - Countdown 10 detik tampil di Serial Monitor (115200 baud).
   3. Setelah 10 Detik:
      - Semua LED berkedip serentak 2x sebagai tanda sukses.
@@ -45,9 +47,14 @@ unsigned long lastAnimStep = 0;
 int animStep = 0;
 int lastRemainingSec = -1;
 
-// =============================================================================
-// FUNGSI CEK PUSH BUTTON (DEBOUNCE)
-// =============================================================================
+// Matikan / Nyalakan LED Warna
+void setRgb(bool r, bool y, bool g) {
+  digitalWrite(PIN_LED_RED, r ? HIGH : LOW);
+  digitalWrite(PIN_LED_YELLOW, y ? HIGH : LOW);
+  digitalWrite(PIN_LED_GREEN, g ? HIGH : LOW);
+}
+
+// Cek Push Button dengan Debounce
 bool checkButtonPressed() {
   static unsigned long lastDebounce = 0;
   static int lastBtnState = HIGH;
@@ -72,13 +79,6 @@ bool checkButtonPressed() {
   return pressed;
 }
 
-// Matikan / Nyalakan LED Warna
-void setRgb(bool r, bool y, bool g) {
-  digitalWrite(PIN_LED_RED, r ? HIGH : LOW);
-  digitalWrite(PIN_LED_YELLOW, y ? HIGH : LOW);
-  digitalWrite(PIN_LED_GREEN, g ? HIGH : LOW);
-}
-
 // =============================================================================
 // SETUP
 // =============================================================================
@@ -86,15 +86,16 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   
-  Serial.println("\n========================================================");
+  Serial.println("");
+  Serial.println("========================================================");
   Serial.println("   ESP32 HARDWARE CHECKER: LED & PUSH BUTTON TEST");
   Serial.println("========================================================");
   Serial.println(" Pin Mapping:");
-  Serial.println("   🔴 LED Merah   : GPIO 23");
-  Serial.println("   🟡 LED Kuning  : GPIO 22");
-  Serial.println("   🟢 LED Hijau   : GPIO 25");
-  Serial.println("   ⚪ LED Putih   : GPIO 33");
-  Serial.println("   🔘 Push Button : GPIO 32");
+  Serial.println("   [R] LED Merah   : GPIO 23");
+  Serial.println("   [Y] LED Kuning  : GPIO 22");
+  Serial.println("   [G] LED Hijau   : GPIO 25");
+  Serial.println("   [W] LED Putih   : GPIO 33");
+  Serial.println("   [B] Push Button : GPIO 32");
   Serial.println("--------------------------------------------------------");
 
   pinMode(PIN_LED_RED, OUTPUT);
@@ -123,18 +124,18 @@ void loop() {
     animStep = 0;
     lastRemainingSec = -1;
 
-    Serial.println("\n🎉 [TOMBOL DITEKAN!] MEMULAI ANIMASI 10 DETIK! 🎉");
+    Serial.println("\n[RUN] TOMBOL DITEKAN! MEMULAI ANIMASI 10 DETIK!");
   }
 
   // 2. Mode Animasi 10 Detik
   if (isPartyMode) {
     unsigned long elapsed = now - partyStartTime;
-    int remainingSec = (PARTY_DURATION_MS - elapsed + 999) / 1000;
+    int remainingSec = (int)((PARTY_DURATION_MS - elapsed + 999) / 1000);
 
     // Cetak Countdown tiap detik
     if (remainingSec != lastRemainingSec && remainingSec >= 0) {
       lastRemainingSec = remainingSec;
-      Serial.print("⏳ Sisa Waktu Animasi: ");
+      Serial.print("[TIMER] Sisa Waktu Animasi: ");
       Serial.print(remainingSec);
       Serial.println(" Detik...");
     }
@@ -207,7 +208,7 @@ void loop() {
       setRgb(false, false, false);
       digitalWrite(PIN_LED_WHITE, HIGH); // LED Putih kembali solid ON
 
-      Serial.println("\n[✓ SELESAI] Animasi 10 detik tuntas!");
+      Serial.println("\n[OK] Animasi 10 detik tuntas!");
       Serial.println("[STANDBY] LED Putih Solid ON. Siap dipencet lagi!\n");
     }
   } else {
