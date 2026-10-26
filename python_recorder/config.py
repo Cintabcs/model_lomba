@@ -2,7 +2,7 @@
 import os
 
 # ESP32 Access Point Configuration
-ESP_IP = "192.168.1.7"       # IP dari Wi-Fi Rumah (sebelumnya 192.168.4.1)
+ESP_IP = "192.168.1.9"       # IP aktif ESP32 di router Wi-Fi Rumah
 ESP_PORT = 8080             # TCP Data Stream Port
 
 # Sampling & Recording Settings
