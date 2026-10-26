@@ -1,19 +1,31 @@
+#include <Arduino.h>
+
 /*
   =============================================================================
-  ESP32 EDGE AI WATER QUALITY CLASSIFIER FIRMWARE (30s TEST + 5s INFERENCE)
+  ESP32 FULL EDGE AI WATER QUALITY CLASSIFIER (OFFLINE-FIRST 30s SYSTEM)
   =============================================================================
-  Fitur Sistem:
-  - 1x Push Button: Pemicu mulai pengujian 30 detik (INPUT_PULLUP ke GND).
-  - 1x LED Putih:
-      * Standby / Siap: MENYALA TERUS (Solid ON).
-      * Sedang Proses Uji (30 Detik): KEDIP-KEDIP (Blinking 200 ms).
+  Pinout sesuai jalur PCB:
+  - 1x LED Status (Biru) : GPIO 33 (D33)
+      * Standby / Siap   : MENYALA TERUS (Solid ON).
+      * Sedang Proses Uji: KEDAP-KEDIP (Blinking 150 ms) selama 30 detik.
   - 3x LED Hasil Klasifikasi:
-      * Hijau  : Low (Air Bersih / PDAM)
-      * Kuning : Medium (Air Sedang)
-      * Merah  : High (Air Kotor / Keruh)
-  - Edge AI Model: Random Forest 5-detik windowing (< 1 ms inferensi).
-  - Selama 30 detik, model mengambil keputusan setiap 5 detik dan memperbarui LED.
-  - Setelah 30 detik selesai, hasil akhir (voting mayoritas) dikunci di LED.
+      * Hijau            : GPIO 25 (D25) -> Low (Air Bersih / PDAM)
+      * Kuning           : GPIO 22 (D22) -> Medium (Air Sedang)
+      * Merah            : GPIO 23 (D23) -> High (Air Kotor / Keruh)
+  - 1x Push Button       : GPIO 32 (D32) -> Internal INPUT_PULLUP (kaki lain ke GND)
+  - 2x Sensor Analog     : TDS (GPIO 34) & Turbidity (GPIO 35)
+
+  Arsitektur Edge AI (100% Offline-First):
+  1. Boot instan (< 100 ms), tidak pernah macet menunggu Wi-Fi / internet.
+  2. Begitu alat nyala: LED Status (Biru D33) langsung MENYALA SOLID (Standby Siap).
+  3. Saat tombol ditekan:
+     - LED Status (D33) kedap-kedip selama 30 detik pengujian.
+     - Setiap 5 detik (50 sampel @ 10 Hz), model Random Forest (rf_model.h)
+       mengekstrak 8 fitur statistik dan mengambil keputusan klasifikasi.
+     - LED Hasil (Hijau/Kuning/Merah) menyala realtime sesuai kondisi air.
+  4. Setelah 30 detik selesai:
+     - LED Status (D33) kembali MENYALA SOLID.
+     - LED Hasil akhir terkunci menyala berdasarkan suara terbanyak (majority vote).
   =============================================================================
 */
 
@@ -21,27 +33,25 @@
   #include <WiFi.h>
 #elif defined(ESP8266)
   #include <ESP8266WiFi.h>
-#else
-  #error "Board tidak didukung! Gunakan ESP32 atau ESP8266."
 #endif
 
-#include "rf_model.h" // Model Random Forest Edge AI
+#include "rf_model.h" // Model Random Forest Edge AI (5-Second Window)
 
 // =============================================================================
-// KONFIGURASI PIN SENSOR, LED & PUSH BUTTON
+// KONFIGURASI PIN PCB FISIK
 // =============================================================================
 #if defined(ESP32)
-  // Pin Sensor Analog
-  const int PIN_TDS           = 34; // Sinyal Analog TDS (GPIO34 / ADC1)
-  const int PIN_TURBIDITY     = 35; // Sinyal Analog Turbidity (GPIO35 / ADC1)
+  // Sensor Analog ADC1 (Aman digunakan bersamaan dengan Wi-Fi)
+  const int PIN_TDS           = 34; // Sinyal Analog TDS (GPIO 34 / ADC1)
+  const int PIN_TURBIDITY     = 35; // Sinyal Analog Turbidity (GPIO 35 / ADC1)
 
-  // Pin Indikator LED Klasifikasi Hasil (Sesuai Jalur PCB)
+  // Indikator LED Klasifikasi Hasil
   const int PIN_LED_RED       = 23; // LED Merah  -> High (Air Kotor / Keruh) (D23)
   const int PIN_LED_YELLOW    = 22; // LED Kuning -> Medium (Air Sedang)      (D22)
   const int PIN_LED_GREEN     = 25; // LED Hijau  -> Low (Air Bersih)         (D25)
 
-  // Pin Indikator Status & Tombol Trigger (Sesuai Jalur PCB)
-  const int PIN_LED_WHITE     = 33; // LED Putih  -> Standby Solid ON / Blink saat Proses (D33)
+  // Indikator Status & Tombol Trigger
+  const int PIN_LED_STATUS    = 33; // LED Status (Biru) -> Standby Solid ON / Blink saat Proses (D33)
   const int PIN_BUTTON        = 32; // Push Button (D32, INPUT_PULLUP ke GND)
 
   const float VREF            = 3.3;       
@@ -52,14 +62,26 @@
   const int PIN_LED_GREEN     = D1;
   const int PIN_LED_YELLOW    = D2;
   const int PIN_LED_RED       = D3;
-  const int PIN_LED_WHITE     = D4;
+  const int PIN_LED_STATUS    = D4;
   const int PIN_BUTTON        = D5;
   const float VREF            = 3.3;
   const float ADC_RESOLUTION  = 1023.0;
 #endif
 
 // =============================================================================
-// EDGE AI RING BUFFER & KONTROL PENGUJIAN 30 DETIK
+// OPSIONAL: KONEKSI WI-FI BACKGROUND (TIDAK MEMBLOKIR BOOT / SISTEM)
+// =============================================================================
+#define ENABLE_BACKGROUND_WIFI true  
+
+const char *WIFI_SSID     = "MyRepublic_C2222847";
+const char *WIFI_PASSWORD = "C2222847";
+const int SERVER_PORT     = 8080;
+
+WiFiServer server(SERVER_PORT);
+WiFiClient client;
+
+// =============================================================================
+// VARIABEL PENGUJIAN 30 DETIK & BUFFER EDGE AI
 // =============================================================================
 const int WINDOW_SIZE = 50; // 5 Detik = 50 Sampel pada 10 Hz
 float tdsBuffer[WINDOW_SIZE];
@@ -73,19 +95,25 @@ bool isTesting = false;
 unsigned long testStartTime = 0;
 const unsigned long TEST_DURATION_MS = 30000; // 30 Detik
 
-// Timer Blinking LED Putih (Non-blocking)
-unsigned long lastBlinkTime = 0;
-bool whiteLedState = HIGH;
-const unsigned long BLINK_INTERVAL_MS = 200; // Kedip setiap 200 ms
+// Timer Blinking LED Status (Non-blocking)
+unsigned long lastStatusBlink = 0;
+bool statusLedState = HIGH;
+const unsigned long BLINK_INTERVAL_MS = 150; // Kedip cepat 150 ms saat proses
 
-// Akumulator Voting Keputusan 5-detik selama 30 detik
+// Voting Keputusan 5-detikan selama 30 detik
 int voteCountLow = 0;
 int voteCountMed = 0;
 int voteCountHigh = 0;
 int totalDecisions = 0;
 
+// Sampling Sensor (10 Hz = 100 ms)
+const unsigned long SAMPLE_INTERVAL_MS = 100;
+unsigned long lastSampleTime = 0;
+unsigned long sampleId = 0;
+float defaultTemperature = 25.0; // Suhu default air (derajat Celcius)
+
 // =============================================================================
-// FUNGSI PENGENDALI INDIKATOR LED KLASIFIKASI
+// FUNGSI KENDALI LED HASIL KLASIFIKASI
 // =============================================================================
 void setClassificationLeds(String label) {
   if (label == "Low") {
@@ -101,7 +129,7 @@ void setClassificationLeds(String label) {
     digitalWrite(PIN_LED_YELLOW, LOW);
     digitalWrite(PIN_LED_RED, HIGH);
   } else {
-    // Matikan semua LED hasil (saat standby atau reset)
+    // Matikan semua LED hasil saat standby atau reset awal
     digitalWrite(PIN_LED_GREEN, LOW);
     digitalWrite(PIN_LED_YELLOW, LOW);
     digitalWrite(PIN_LED_RED, LOW);
@@ -109,7 +137,7 @@ void setClassificationLeds(String label) {
 }
 
 // =============================================================================
-// FUNGSI DEBOUNCE PUSH BUTTON (NON-BLOCKING)
+// FUNGSI CEK PUSH BUTTON (DEBOUNCE NON-BLOCKING)
 // =============================================================================
 bool checkButtonPressed() {
   static unsigned long lastDebounceTime = 0;
@@ -125,7 +153,7 @@ bool checkButtonPressed() {
   if ((millis() - lastDebounceTime) > 50) { // Debounce 50 ms
     if (reading != buttonState) {
       buttonState = reading;
-      if (buttonState == LOW) { // Tombol ditekan (karena INPUT_PULLUP)
+      if (buttonState == LOW) { // Tombol ditekan (koneksi ke GND)
         triggered = true;
       }
     }
@@ -143,7 +171,7 @@ void updateEdgeAiWindow(float tds, float turb, unsigned long currentTestElapsed)
   bufferIndex = (bufferIndex + 1) % WINDOW_SIZE;
   if (bufferCount < WINDOW_SIZE) bufferCount++;
 
-  // Jalankan klasifikasi setiap 5 detik (50 sampel)
+  // Jalankan klasifikasi Edge AI setiap kali terkumpul 50 sampel baru
   if (bufferCount == WINDOW_SIZE && (bufferIndex % WINDOW_SIZE == 0)) {
     float tdsMean = 0, tdsMin = 99999, tdsMax = -99999;
     float turbMean = 0, turbMin = 99999, turbMax = -99999;
@@ -169,13 +197,13 @@ void updateEdgeAiWindow(float tds, float turb, unsigned long currentTestElapsed)
     float tdsStd = sqrt(tdsVar / WINDOW_SIZE);
     float turbStd = sqrt(turbVar / WINDOW_SIZE);
 
-    // Array 8 Fitur Statistik untuk Random Forest Edge AI
+    // Array 8 Fitur Statistik untuk Model Random Forest
     float features[8] = {
       tdsMean, tdsStd, tdsMin, tdsMax,
       turbMean, turbStd, turbMin, turbMax
     };
 
-    // Inferensi Model Edge AI (< 0.2 ms pada ESP32)
+    // Inferensi Edge AI Offline (< 0.2 ms pada ESP32)
     currentAiPrediction = EdgeWaterClassifier::predictLabel(features);
     totalDecisions++;
 
@@ -183,17 +211,17 @@ void updateEdgeAiWindow(float tds, float turb, unsigned long currentTestElapsed)
     else if (currentAiPrediction == "Medium") voteCountMed++;
     else if (currentAiPrediction == "High") voteCountHigh++;
 
-    // Perbarui LED hasil sesuai prediksi 5-detikan terkini
+    // Perbarui LED hasil sesuai keputusan sementara 5-detikan
     setClassificationLeds(currentAiPrediction);
 
     int elapsedSec = currentTestElapsed / 1000;
-    int remainingSec = (TEST_DURATION_MS - currentTestElapsed) / 1000;
+    int remainingSec = (int)((TEST_DURATION_MS - currentTestElapsed + 999) / 1000);
     if (remainingSec < 0) remainingSec = 0;
 
     Serial.println("\n-----------------------------------------------------------------");
-    Serial.print(" [🤖 KEPUTUSAN 5-DETIK] Waktu: "); Serial.print(elapsedSec);
+    Serial.print(" [AI 5s] Waktu: "); Serial.print(elapsedSec);
     Serial.print("s / 30s (Sisa: "); Serial.print(remainingSec); Serial.println("s)");
-    Serial.print(" => KELAS SEMENTARA: "); Serial.println(currentAiPrediction);
+    Serial.print(" => KELAS TERDETEKSI: "); Serial.println(currentAiPrediction);
     Serial.print("    TDS  : Mean="); Serial.print(tdsMean, 1);
     Serial.print(" | Min="); Serial.print(tdsMin, 1);
     Serial.print(" | Max="); Serial.print(tdsMax, 1);
@@ -207,84 +235,54 @@ void updateEdgeAiWindow(float tds, float turb, unsigned long currentTestElapsed)
 }
 
 // =============================================================================
-// PILIH MODE WIFI
-// =============================================================================
-#define USE_HOME_WIFI true  
-
-#if USE_HOME_WIFI
-  const char *wifi_ssid     = "MyRepublic_C2222847";
-  const char *wifi_password = "C2222847"; 
-#else
-  const char *wifi_ssid     = "ESP_DA_Logger";
-  const char *wifi_password = "12345678";
-#endif
-
-const int SERVER_PORT = 8080;
-WiFiServer server(SERVER_PORT);
-WiFiClient client;
-
-const unsigned long SAMPLE_INTERVAL_MS = 100; // 10 Hz (100 ms)
-unsigned long lastSampleTime = 0;
-unsigned long sampleId = 0;
-float defaultTemperature = 25.0; // Suhu default air (°C)
-
-// =============================================================================
 // SETUP
 // =============================================================================
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Serial.println("\n========================================================");
-  Serial.println("  ESP32 EDGE AI WATER QUALITY CLASSIFIER (30s SYSTEM)");
+  
+  Serial.println("");
   Serial.println("========================================================");
+  Serial.println("   ESP32 FULL EDGE AI WATER CLASSIFIER (30s SYSTEM)");
+  Serial.println("========================================================");
+  Serial.println(" Pinout PCB:");
+  Serial.println("   [R]   LED Merah  : GPIO 23 (High / Keruh)");
+  Serial.println("   [Y]   LED Kuning : GPIO 22 (Medium / Sedang)");
+  Serial.println("   [G]   LED Hijau  : GPIO 25 (Low / Bersih)");
+  Serial.println("   [STS] LED Status : GPIO 33 (Biru - Standby Solid / Blink)");
+  Serial.println("   [BTN] Tombol Uji : GPIO 32 (INPUT_PULLUP)");
+  Serial.println("   [TDS] Sensor TDS : GPIO 34 (ADC1)");
+  Serial.println("   [TRB] Sensor Turb: GPIO 35 (ADC1)");
+  Serial.println("--------------------------------------------------------");
 
-  // Konfigurasi Pin LED & Push Button
-  pinMode(PIN_LED_GREEN, OUTPUT);
-  pinMode(PIN_LED_YELLOW, OUTPUT);
+  // Inisialisasi Pin Output & Input
   pinMode(PIN_LED_RED, OUTPUT);
-  pinMode(PIN_LED_WHITE, OUTPUT);
+  pinMode(PIN_LED_YELLOW, OUTPUT);
+  pinMode(PIN_LED_GREEN, OUTPUT);
+  pinMode(PIN_LED_STATUS, OUTPUT);
   pinMode(PIN_BUTTON, INPUT_PULLUP);
 
-  // Status Awal Standby:
-  digitalWrite(PIN_LED_WHITE, HIGH); // LED Putih MENYALA TERUS saat standby
-  setClassificationLeds("");        // Matikan semua LED hasil klasifikasi
+  // Status Awal Standby (Langsung siap seketika!)
+  digitalWrite(PIN_LED_STATUS, HIGH); // LED Status (Biru) MENYALA TERUS (Solid ON)
+  setClassificationLeds("");          // LED Hasil padam
 
   #if defined(ESP32)
-    analogSetAttenuation(ADC_11db); // Rentang ADC 0 - 3.3V
+    analogSetAttenuation(ADC_11db); // ADC Range penuh 0 - 3.3V
     pinMode(PIN_TDS, INPUT);
     pinMode(PIN_TURBIDITY, INPUT);
   #endif
 
-  #if USE_HOME_WIFI
-    Serial.print("Connecting ke Wi-Fi: ");
-    Serial.println(wifi_ssid);
+  #if ENABLE_BACKGROUND_WIFI
+    // Mulai Wi-Fi secara NON-BLOCKING (background, tidak menahan jalannya alat)
+    Serial.print("[WIFI] Inisialisasi Wi-Fi: ");
+    Serial.println(WIFI_SSID);
     WiFi.mode(WIFI_STA);
-    WiFi.begin(wifi_ssid, wifi_password);
-
-    int retries = 0;
-    while (WiFi.status() != WL_CONNECTED && retries < 25) {
-      delay(400);
-      Serial.print(".");
-      retries++;
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\n[✓] Terhubung ke Wi-Fi!");
-      Serial.print("IP ESP32: ");
-      Serial.println(WiFi.localIP());
-    } else {
-      Serial.println("\n[!] Gagal ke Wi-Fi, mengaktifkan AP Mode...");
-      WiFi.mode(WIFI_AP);
-      WiFi.softAP("ESP_DA_Logger", "12345678");
-    }
-  #else
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(wifi_ssid, wifi_password);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    server.begin();
   #endif
 
-  server.begin();
-  Serial.println("TCP Server siap pada port 8080.");
-  Serial.println("\n>>> SISTEM STANDBY: LED Putih ON. Tekan Push Button untuk Mulai Uji 30 Detik! <<<\n");
+  Serial.println("\n>>> SISTEM SIAP! LED Status (Biru D33) Solid ON.");
+  Serial.println(">>> Tekan Push Button (D32) untuk memulai pengujian 30 detik! <<<\n");
 }
 
 // =============================================================================
@@ -293,12 +291,14 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
 
-  // 1. Cek Koneksi Client Baru (Laptop)
-  if (!client || !client.connected()) {
-    client = server.available();
-  }
+  // 1. Terima Client Wi-Fi (Jika Ada Laptop Terkoneksi)
+  #if ENABLE_BACKGROUND_WIFI
+    if (!client || !client.connected()) {
+      client = server.available();
+    }
+  #endif
 
-  // 2. Baca Push Button untuk Memulai Uji 30 Detik
+  // 2. Baca Push Button (D32) untuk Memulai Pengujian 30 Detik
   if (!isTesting && checkButtonPressed()) {
     isTesting = true;
     testStartTime = currentMillis;
@@ -312,30 +312,30 @@ void loop() {
     setClassificationLeds(""); // Reset LED hasil
 
     Serial.println("\n========================================================");
-    Serial.println(" [▶ PUSH BUTTON DITEKAN] MEMULAI PENGUJIAN 30 DETIK!");
-    Serial.println(" LED Putih Berkedip (Proses Akuisisi & Inferensi AI)...");
+    Serial.println(" [RUN] TOMBOL DITEKAN! PENGUJIAN 30 DETIK DIMULAI!");
+    Serial.println(" LED Status (Biru D33) Berkedip Cepat (Proses Edge AI)...");
     Serial.println("========================================================");
   }
 
-  // 3. Kontrol Indikator LED Putih
+  // 3. Kontrol Indikator LED Status (Biru D33)
   if (isTesting) {
-    // Saat proses uji 30 detik: LED Putih KEDIP-KEDIP (Blinking)
-    if (currentMillis - lastBlinkTime >= BLINK_INTERVAL_MS) {
-      lastBlinkTime = currentMillis;
-      whiteLedState = !whiteLedState;
-      digitalWrite(PIN_LED_WHITE, whiteLedState);
+    // Saat proses uji 30 detik: KEDAP-KEDIP CEPAT (150 ms)
+    if (currentMillis - lastStatusBlink >= BLINK_INTERVAL_MS) {
+      lastStatusBlink = currentMillis;
+      statusLedState = !statusLedState;
+      digitalWrite(PIN_LED_STATUS, statusLedState ? HIGH : LOW);
     }
   } else {
-    // Saat standby / tidak menguji: LED Putih MENYALA TERUS (Solid ON)
-    digitalWrite(PIN_LED_WHITE, HIGH);
+    // Saat standby: MENYALA TERUS (Solid ON)
+    digitalWrite(PIN_LED_STATUS, HIGH);
   }
 
-  // 4. Siklus Sampling Sensor 10 Hz (100 ms)
+  // 4. Siklus Sampling Sensor 10 Hz (Setiap 100 ms)
   if (currentMillis - lastSampleTime >= SAMPLE_INTERVAL_MS) {
     lastSampleTime = currentMillis;
     sampleId++;
 
-    // A. Baca Sensor TDS (GPIO34)
+    // A. Baca Sensor TDS (GPIO 34)
     int tdsRaw = analogRead(PIN_TDS);
     float tdsVoltage = tdsRaw * (VREF / ADC_RESOLUTION);
     float compCoeff = 1.0 + 0.02 * (defaultTemperature - 25.0);
@@ -345,7 +345,7 @@ void loop() {
                     + 857.39 * compVolt) * 0.5;
     if (tdsPpm < 0) tdsPpm = 0;
 
-    // B. Baca Sensor Turbidity (GPIO35)
+    // B. Baca Sensor Turbidity (GPIO 35)
     int turbidityRaw = analogRead(PIN_TURBIDITY);
     float turbidityVoltage = turbidityRaw * (VREF / ADC_RESOLUTION);
     float turbidityNtu = 0;
@@ -360,15 +360,15 @@ void loop() {
     if (isTesting) {
       unsigned long elapsedTestTime = currentMillis - testStartTime;
 
-      // Update Buffer & Inferensi Edge AI setiap 5 detik
+      // Update Ring Buffer & Jalankan Inferensi Edge AI setiap 5 detik
       updateEdgeAiWindow(tdsPpm, turbidityNtu, elapsedTestTime);
 
-      // Cek apakah durasi 30 detik sudah tercapai
+      // Cek apakah 30 detik sudah tercapai
       if (elapsedTestTime >= TEST_DURATION_MS) {
         isTesting = false;
-        digitalWrite(PIN_LED_WHITE, HIGH); // LED Putih kembali menyala solid
+        digitalWrite(PIN_LED_STATUS, HIGH); // LED Status (Biru) kembali solid ON
 
-        // Tentukan Hasil Akhir berdasarkan Voting Mayoritas keputusan 5-detik
+        // Tentukan Hasil Akhir berdasarkan Suara Terbanyak (Majority Vote)
         String finalVerdict = "Low";
         if (voteCountHigh >= voteCountMed && voteCountHigh >= voteCountLow && voteCountHigh > 0) {
           finalVerdict = "High";
@@ -381,44 +381,48 @@ void loop() {
         }
 
         currentAiPrediction = finalVerdict;
-        setClassificationLeds(finalVerdict); // Kunci tampilan LED hasil akhir
+        
+        // KUNCI LED HASIL AKHIR AGAR TETAP MENYALA
+        setClassificationLeds(finalVerdict);
 
         Serial.println("\n========================================================");
-        Serial.println(" [✓ SELESAI] PENGUJIAN 30 DETIK TELAH SELESAI!");
+        Serial.println(" [OK] PENGUJIAN 30 DETIK SELESAI!");
         Serial.print(" HASIL AKHIR (MAJORITY VOTE) : ");
         Serial.println(finalVerdict);
         Serial.print(" Rincian Voting 5-Detikan    : Low="); Serial.print(voteCountLow);
         Serial.print(" | Medium="); Serial.print(voteCountMed);
         Serial.print(" | High="); Serial.println(voteCountHigh);
-        Serial.println(" Status LED Putih: MENYALA TERUS (STANDBY)");
-        Serial.println(" Tekan Push Button untuk mengulang pengujian.");
+        Serial.println(" Status LED: LED Status (Biru D33) Solid ON.");
+        Serial.println(" LED Hasil Klasifikasi Tetap Menyala.");
+        Serial.println(" Tekan Push Button untuk memulai pengujian baru.");
         Serial.println("========================================================\n");
       }
     }
 
-    // D. Stream Data JSON ke Laptop (Wi-Fi TCP)
-    String jsonData = "{";
-    jsonData += "\"sample_id\":" + String(sampleId) + ",";
-    jsonData += "\"esp_timestamp_ms\":" + String(currentMillis) + ",";
-    jsonData += "\"is_testing\":" + String(isTesting ? "true" : "false") + ",";
-    jsonData += "\"tds_raw\":" + String(tdsRaw) + ",";
-    jsonData += "\"tds_voltage\":" + String(tdsVoltage, 3) + ",";
-    jsonData += "\"tds_ppm\":" + String(tdsPpm, 1) + ",";
-    jsonData += "\"turbidity_raw\":" + String(turbidityRaw) + ",";
-    jsonData += "\"turbidity_voltage\":" + String(turbidityVoltage, 3) + ",";
-    jsonData += "\"turbidity_ntu\":" + String(turbidityNtu, 1) + ",";
-    jsonData += "\"edge_ai_class\":\"" + currentAiPrediction + "\"";
-    jsonData += "}\n";
+    // D. Stream Data JSON jika terhubung ke Wi-Fi (live_viewer.py)
+    #if ENABLE_BACKGROUND_WIFI
+      if (client && client.connected()) {
+        String jsonData = "{";
+        jsonData += "\"sample_id\":" + String(sampleId) + ",";
+        jsonData += "\"esp_timestamp_ms\":" + String(currentMillis) + ",";
+        jsonData += "\"is_testing\":" + String(isTesting ? "true" : "false") + ",";
+        jsonData += "\"tds_raw\":" + String(tdsRaw) + ",";
+        jsonData += "\"tds_voltage\":" + String(tdsVoltage, 3) + ",";
+        jsonData += "\"tds_ppm\":" + String(tdsPpm, 1) + ",";
+        jsonData += "\"turbidity_raw\":" + String(turbidityRaw) + ",";
+        jsonData += "\"turbidity_voltage\":" + String(turbidityVoltage, 3) + ",";
+        jsonData += "\"turbidity_ntu\":" + String(turbidityNtu, 1) + ",";
+        jsonData += "\"edge_ai_class\":\"" + currentAiPrediction + "\"";
+        jsonData += "}\n";
+        client.print(jsonData);
+      }
+    #endif
 
-    if (client && client.connected()) {
-      client.print(jsonData);
-    }
-
-    // E. Monitor Nilai Sensor Realtime (Setiap 1 Detik saat Standby)
+    // E. Monitor Pembacaan Serial saat Standby (Setiap 1 Detik)
     if (!isTesting && (sampleId % 10 == 0)) {
       Serial.print("[STANDBY] TDS: "); Serial.print(tdsPpm, 1);
-      Serial.print(" PPM | TURB: "); Serial.print(turbidityNtu, 1);
-      Serial.println(" NTU (Tekan Push Button untuk Uji)");
+      Serial.print(" PPM | Turb: "); Serial.print(turbidityNtu, 1);
+      Serial.println(" NTU | Tekan Push Button (D32) untuk Mulai Uji 30s");
     }
   }
 }
