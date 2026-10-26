@@ -36,20 +36,25 @@ client_socket = None
 lock = threading.Lock()
 stop_flag = False
 
-def connect_to_esp(ip=ESP_IP, port=ESP_PORT):
+def connect_to_esp(ip=ESP_IP, port=ESP_PORT, max_attempts=6):
     global client_socket
     print(f"\n[+] Menghubungkan ke ESP32 di {ip}:{port}...")
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(2.5)
-        s.connect((ip, port))
-        s.settimeout(0.5)
-        client_socket = s
-        print(f"[✓] BERHASIL TERHUBUNG KE ESP32 ({ip}:{port})!\n")
-        return True
-    except Exception as e:
-        print(f"[!] Gagal koneksi ke {ip}:{port} -> {e}")
-        return False
+    for attempt in range(1, max_attempts + 1):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(2.0)
+            s.connect((ip, port))
+            s.settimeout(0.5)
+            client_socket = s
+            print(f"[✓] BERHASIL TERHUBUNG KE ESP32 ({ip}:{port})!\n")
+            return True
+        except Exception:
+            sys.stdout.write(f"\r[.] Menunggu ESP32 online di {ip}... (Percobaan {attempt}/{max_attempts}) ")
+            sys.stdout.flush()
+            time.sleep(1.2)
+            
+    print(f"\n[!] Belum dapat terhubung ke {ip}:{port}.")
+    return False
 
 def receive_thread():
     global client_socket, stop_flag

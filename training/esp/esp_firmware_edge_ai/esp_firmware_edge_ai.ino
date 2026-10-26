@@ -136,35 +136,54 @@ void setClassificationLeds(String label) {
   }
 }
 
+// Kondisi normal tombol saat tidak ditekan (akan dipelajari otomatis saat boot)
+int buttonIdleState = HIGH; 
+
 // =============================================================================
-// FUNGSI CEK PUSH BUTTON (DEBOUNCE NON-BLOCKING & ANTI-FALSE-TRIGGER BOOT)
+// FUNGSI CEK PUSH BUTTON (AUTO-LEARNING IDLE STATE & ANTI-RESET TRIGGER)
 // =============================================================================
 bool checkButtonPressed() {
-  // 1. Abaikan transien daya saat 2 detik pertama setelah dicolok kabel/baterai
+  // 1. Abaikan transien daya saat 2 detik pertama setelah dicolok kabel/baterai/reset
   if (millis() < 2000) {
     return false;
   }
 
-  static int lastStableState = HIGH;
-  static int lastReadState = HIGH;
+  static int lastStableState = -1;
+  static int lastReadState = -1;
   static unsigned long lastDebounceTime = 0;
+  static bool hasBeenReleased = true;
   bool pressed = false;
+
+  // Inisialisasi awal saat pertama kali dipanggil setelah 2 detik
+  if (lastStableState == -1) {
+    lastStableState = digitalRead(PIN_BUTTON);
+    lastReadState = lastStableState;
+    buttonIdleState = lastStableState; // Kunci kondisi diam saat boot
+    return false;
+  }
 
   int reading = digitalRead(PIN_BUTTON);
 
-  // Jika kondisi pembacaan berubah (kemungkinan noise / bouncing)
+  // Jika kondisi pembacaan berubah (kemungkinan noise / getaran mekanis)
   if (reading != lastReadState) {
     lastDebounceTime = millis();
     lastReadState = reading;
   }
 
-  // Jika pembacaan sudah stabil selama 25 ms (responsif, 1x klik langsung kena!)
-  if ((millis() - lastDebounceTime) >= 25) {
+  // Jika kondisi baru sudah stabil selama 30 ms
+  if ((millis() - lastDebounceTime) >= 30) {
     if (reading != lastStableState) {
       lastStableState = reading;
-      // Trigger HANYA saat tombol baru ditekan (transisi HIGH ke LOW)
-      if (lastStableState == LOW) {
-        pressed = true;
+
+      // Trigger HANYA saat tombol ditekan (berubah dari posisi idle)
+      if (lastStableState != buttonIdleState) {
+        if (hasBeenReleased) {
+          pressed = true;
+          hasBeenReleased = false; // Kunci agar tidak trigger berulang kali
+        }
+      } else {
+        // Tombol kembali dilepas ke posisi idle
+        hasBeenReleased = true;
       }
     }
   }
