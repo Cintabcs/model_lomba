@@ -2,39 +2,44 @@
 
 /*
   =============================================================================
-  ESP32 LED & PUSH BUTTON HARDWARE TESTER (10-SECOND PARTY ANIMATION)
+  ESP32 HARDWARE CHECKER: LED, PUSH BUTTON & TURBIDITY SENSOR TEST
   =============================================================================
   Pinout sesuai jalur PCB:
-  - LED Merah   : GPIO 23 (D23)
-  - LED Kuning  : GPIO 22 (D22)
-  - LED Hijau   : GPIO 25 (D25)
-  - LED Putih   : GPIO 33 (D33)
-  - Push Button : GPIO 32 (D32) -> Internal INPUT_PULLUP (kaki lain ke GND)
+  - LED Merah      : GPIO 23 (D23)
+  - LED Kuning     : GPIO 22 (D22)
+  - LED Hijau      : GPIO 25 (D25)
+  - LED Putih      : GPIO 33 (D33)
+  - Push Button    : GPIO 32 (D32) -> Internal INPUT_PULLUP (kaki lain ke GND)
+  - Turbidity Sens : GPIO 35 (D35) -> Analog Input ADC1
 
-  Cara Kerja:
+  Fitur:
   1. Standby:
      - LED Putih MENYALA TERUS (Solid ON).
      - LED Merah, Kuning, Hijau MATI.
+     - Membaca dan menampilkan nilai sensor Turbidity secara realtime tiap 1 detik:
+       Raw ADC, Tegangan (Volt), dan estimasi Nilai Kekeruhan (NTU).
   2. Saat Tombol (D32) Ditekan:
      - Masuk mode pesta 10 Detik!
      - LED Putih kedap-kedip cepat (indikator proses).
-     - LED Merah, Kuning, Hijau bergantian (Running Chase & Disco Strobo).
-     - Countdown 10 detik tampil di Serial Monitor (115200 baud).
+     - LED Merah, Kuning, Hijau joget bergantian (Running Chase & Disco Strobo).
+     - Menampilkan pembacaan Turbidity secara intensif bersama countdown waktu.
   3. Setelah 10 Detik:
      - Semua LED berkedip serentak 2x sebagai tanda sukses.
      - LED Putih kembali menyala solid (Standby).
-     - Siap dipencet lagi!
   =============================================================================
 */
 
-// Konfigurasi Pin PCB
+// =============================================================================
+// KONFIGURASI PIN PCB
+// =============================================================================
 const int PIN_LED_RED    = 23; // D23
 const int PIN_LED_YELLOW = 22; // D22
 const int PIN_LED_GREEN  = 25; // D25
 const int PIN_LED_WHITE  = 33; // D33
 const int PIN_BUTTON     = 32; // D32 (INPUT_PULLUP)
+const int PIN_TURBIDITY  = 35; // D35 (atau ganti ke 36/39 jika pakai pin lain)
 
-// Variabel Kontrol
+// Variabel Kontrol Animasi
 bool isPartyMode = false;
 unsigned long partyStartTime = 0;
 const unsigned long PARTY_DURATION_MS = 10000; // 10 Detik
@@ -47,14 +52,22 @@ unsigned long lastAnimStep = 0;
 int animStep = 0;
 int lastRemainingSec = -1;
 
-// Matikan / Nyalakan LED Warna
+// Timer Baca Sensor Turbidity (Non-blocking)
+unsigned long lastTurbRead = 0;
+const unsigned long TURB_INTERVAL_STANDBY = 1000; // Tiap 1 detik saat standby
+
+// =============================================================================
+// FUNGSI PENGENDALI LED
+// =============================================================================
 void setRgb(bool r, bool y, bool g) {
   digitalWrite(PIN_LED_RED, r ? HIGH : LOW);
   digitalWrite(PIN_LED_YELLOW, y ? HIGH : LOW);
   digitalWrite(PIN_LED_GREEN, g ? HIGH : LOW);
 }
 
-// Cek Push Button dengan Debounce
+// =============================================================================
+// FUNGSI CEK PUSH BUTTON (DEBOUNCE)
+// =============================================================================
 bool checkButtonPressed() {
   static unsigned long lastDebounce = 0;
   static int lastBtnState = HIGH;
@@ -80,6 +93,44 @@ bool checkButtonPressed() {
 }
 
 // =============================================================================
+// FUNGSI BACA SENSOR TURBIDITY
+// =============================================================================
+void readAndPrintTurbidity(const char* prefix) {
+  int raw = analogRead(PIN_TURBIDITY);
+  float volt = raw * (3.3 / 4095.0);
+  float ntu = 0.0;
+  
+  // Kalibrasi standar sensor turbidity optik
+  if (volt >= 2.4) {
+    ntu = 0.0;
+  } else {
+    ntu = (2.4 - volt) * (500.0 / 1.4);
+  }
+  if (ntu < 0) ntu = 0;
+
+  Serial.print(prefix);
+  Serial.print(" [TURBIDITY] Raw: ");
+  Serial.print(raw);
+  Serial.print(" | Tegangan: ");
+  Serial.print(volt, 2);
+  Serial.print(" V | Est: ");
+  Serial.print(ntu, 1);
+  Serial.print(" NTU");
+
+  if (raw == 0) {
+    Serial.println("  <-- [0V: Kabel lepas / belum tercolok]");
+  } else if (raw > 4000) {
+    Serial.println("  <-- [3.3V: Air Sangat Bening / Jernih]");
+  } else if (volt >= 2.2) {
+    Serial.println("  <-- [Air Jernih / Bersih]");
+  } else if (volt >= 1.7) {
+    Serial.println("  <-- [Air Sedang / Keruh Ringan]");
+  } else {
+    Serial.println("  <-- [Air Sangat Keruh / Pekat]");
+  }
+}
+
+// =============================================================================
 // SETUP
 // =============================================================================
 void setup() {
@@ -88,14 +139,15 @@ void setup() {
   
   Serial.println("");
   Serial.println("========================================================");
-  Serial.println("   ESP32 HARDWARE CHECKER: LED & PUSH BUTTON TEST");
+  Serial.println("   ESP32 HARDWARE CHECKER: LED, BUTTON & TURBIDITY TEST");
   Serial.println("========================================================");
   Serial.println(" Pin Mapping:");
-  Serial.println("   [R] LED Merah   : GPIO 23");
-  Serial.println("   [Y] LED Kuning  : GPIO 22");
-  Serial.println("   [G] LED Hijau   : GPIO 25");
-  Serial.println("   [W] LED Putih   : GPIO 33");
-  Serial.println("   [B] Push Button : GPIO 32");
+  Serial.println("   [R] LED Merah      : GPIO 23");
+  Serial.println("   [Y] LED Kuning     : GPIO 22");
+  Serial.println("   [G] LED Hijau      : GPIO 25");
+  Serial.println("   [W] LED Putih      : GPIO 33");
+  Serial.println("   [B] Push Button    : GPIO 32");
+  Serial.println("   [T] Sensor Turb    : GPIO 35 (ADC1)");
   Serial.println("--------------------------------------------------------");
 
   pinMode(PIN_LED_RED, OUTPUT);
@@ -104,11 +156,17 @@ void setup() {
   pinMode(PIN_LED_WHITE, OUTPUT);
   pinMode(PIN_BUTTON, INPUT_PULLUP);
 
+  #if defined(ESP32)
+    analogSetAttenuation(ADC_11db); // Set ADC Full Scale Range ke 0 - 3.3V
+    pinMode(PIN_TURBIDITY, INPUT);
+  #endif
+
   // Initial State: Standby
   digitalWrite(PIN_LED_WHITE, HIGH); // LED Putih Solid ON
   setRgb(false, false, false);
 
-  Serial.println("[STANDBY] LED Putih ON. Tekan Push Button (D32) untuk mulai tes 10 detik!\n");
+  Serial.println("[STANDBY] LED Putih ON. Sensor Turbidity membaca realtime.");
+  Serial.println("Tekan Push Button (D32) untuk mulai pesta LED 10 detik!\n");
 }
 
 // =============================================================================
@@ -124,7 +182,9 @@ void loop() {
     animStep = 0;
     lastRemainingSec = -1;
 
-    Serial.println("\n[RUN] TOMBOL DITEKAN! MEMULAI ANIMASI 10 DETIK!");
+    Serial.println("\n========================================================");
+    Serial.println("[RUN] TOMBOL DITEKAN! MEMULAI ANIMASI PESTA 10 DETIK!");
+    Serial.println("========================================================");
   }
 
   // 2. Mode Animasi 10 Detik
@@ -132,12 +192,14 @@ void loop() {
     unsigned long elapsed = now - partyStartTime;
     int remainingSec = (int)((PARTY_DURATION_MS - elapsed + 999) / 1000);
 
-    // Cetak Countdown tiap detik
+    // Cetak Countdown & Sensor Turbidity tiap detik
     if (remainingSec != lastRemainingSec && remainingSec >= 0) {
       lastRemainingSec = remainingSec;
+      Serial.println("--------------------------------------------------------");
       Serial.print("[TIMER] Sisa Waktu Animasi: ");
       Serial.print(remainingSec);
       Serial.println(" Detik...");
+      readAndPrintTurbidity("       ");
     }
 
     // A. Kedip-kedip LED Putih (Blink tiap 120 ms)
@@ -215,5 +277,11 @@ void loop() {
     // Mode Standby: Pastikan LED Putih selalu ON dan warna mati
     digitalWrite(PIN_LED_WHITE, HIGH);
     setRgb(false, false, false);
+
+    // Baca sensor Turbidity tiap 1 detik saat standby
+    if (now - lastTurbRead >= TURB_INTERVAL_STANDBY) {
+      lastTurbRead = now;
+      readAndPrintTurbidity("[STANDBY]");
+    }
   }
 }
