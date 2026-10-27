@@ -47,6 +47,18 @@ const int SERVER_PORT         = 8080;
 const int WINDOW_SIZE                  = 50;    // 5 Detik = 50 Sampel pada 10 Hz
 const unsigned long TEST_DURATION_MS   = 30000; // 30 Detik
 const unsigned long SAMPLE_INTERVAL_MS = 100;   // 10 Hz = 100 ms
-const unsigned long BLINK_INTERVAL_MS  = 150;   // Kedip cepat 150 ms saat pengujian aktif
+// =============================================================================
+// KONFIGURASI MQTT HIVEMQ CLOUD (TLS PORT 8883)
+// =============================================================================
+const char *MQTT_BROKER           = "4ecff5933a704e218192a9a9390c3580.s1.eu.hivemq.cloud";
+const int   MQTT_PORT             = 8883;
+const char *MQTT_USER             = "Aquasentry";
+const char *MQTT_PASS             = "admin123";
+
+// Topik MQTT
+const char *MQTT_TOPIC_TELEMETRY  = "aquasentry/water_quality/telemetry";
+const char *MQTT_TOPIC_RESULT     = "aquasentry/water_quality/result";
+const char *MQTT_TOPIC_STATUS     = "aquasentry/status";
+const char *MQTT_TOPIC_COMMAND    = "aquasentry/command";
 
 #endif // CONFIG_H

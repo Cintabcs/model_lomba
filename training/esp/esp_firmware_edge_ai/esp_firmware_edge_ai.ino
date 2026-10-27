@@ -13,16 +13,20 @@
 
 #if defined(ESP32)
   #include <WiFi.h>
+  #include <WiFiClientSecure.h>
+  #include <PubSubClient.h>
   #include <WebServer.h>
   #include <DNSServer.h>
   #include <Preferences.h>
 #elif defined(ESP8266)
   #include <ESP8266WiFi.h>
+  #include <WiFiClientSecure.h>
+  #include <PubSubClient.h>
   #include <ESP8266WebServer.h>
   #include <DNSServer.h>
 #endif
 
-#include "config.h"      // Pinout & Hardware Parameters
+#include "config.h"      // Pinout, Hardware Parameters, & HiveMQ Cloud MQTT Config
 #include "portal_html.h" // UI Captive Portal Modern
 #include "rf_model.h"    // Embedded Edge AI Model
 
@@ -35,6 +39,10 @@ WebServer webServer(80);
 WiFiServer server(SERVER_PORT);
 WiFiClient client;
 Preferences preferences;
+
+// Klien MQTT TLS HiveMQ Cloud
+WiFiClientSecure tlsClient;
+PubSubClient mqttClient(tlsClient);
 
 bool isApModeActive           = false;
 String savedSsid              = "";
@@ -358,6 +366,85 @@ void handleTcpCommunication() {
   }
 }
 
+// Forward Declarations untuk MQTT Callback
+void startTestingSession(unsigned long currentMillis);
+void cancelTestingSession();
+
+// =============================================================================
+// MODUL MQTT HIVEMQ CLOUD (TLS PORT 8883)
+// =============================================================================
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  String message = "";
+  for (unsigned int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+  message.trim();
+
+  Serial.print("\n[MQTT INCOMING] Topik: ");
+  Serial.print(topic);
+  Serial.print(" | Pesan: ");
+  Serial.println(message);
+
+  if (message == "SET_PRESET:LOW") {
+    overrideSensorActive = true;
+    injectedTdsPpm = 85.0f;
+    injectedTurbNtu = 15.0f;
+    currentPresetName = "LOW";
+    Serial.println("[MQTT] Preset diubah ke LOW");
+  } 
+  else if (message == "SET_PRESET:MEDIUM") {
+    overrideSensorActive = true;
+    injectedTdsPpm = 245.0f;
+    injectedTurbNtu = 215.0f;
+    currentPresetName = "MEDIUM";
+    Serial.println("[MQTT] Preset diubah ke MEDIUM");
+  } 
+  else if (message == "SET_PRESET:HIGH") {
+    overrideSensorActive = true;
+    injectedTdsPpm = 480.0f;
+    injectedTurbNtu = 450.0f;
+    currentPresetName = "HIGH";
+    Serial.println("[MQTT] Preset diubah ke HIGH");
+  } 
+  else if (message == "START_TEST") {
+    if (!isTesting) {
+      startTestingSession(millis());
+    }
+  } 
+  else if (message == "CANCEL_TEST") {
+    if (isTesting) {
+      cancelTestingSession();
+    }
+  }
+}
+
+void maintainMqtt() {
+  if (WiFi.status() != WL_CONNECTED || isApModeActive) return;
+
+  static unsigned long lastMqttAttempt = 0;
+  if (!mqttClient.connected()) {
+    unsigned long now = millis();
+    if (now - lastMqttAttempt > 5000) { // Coba konek tiap 5 detik
+      lastMqttAttempt = now;
+      String clientId = "ESP32_AquaSentry_" + String((uint32_t)ESP.getEfuseMac(), HEX);
+      Serial.print("[MQTT] Menghubungkan ke HiveMQ Cloud (TLS 8883)... ");
+      if (mqttClient.connect(clientId.c_str(), MQTT_USER, MQTT_PASS)) {
+        Serial.println("[OK] TERHUBUNG KE HIVEMQ CLOUD!");
+        mqttClient.subscribe(MQTT_TOPIC_COMMAND);
+        
+        // Kirim pengumuman status online
+        String onlineMsg = "{\"device\":\"ESP32_AquaSentry\",\"status\":\"online\"}";
+        mqttClient.publish(MQTT_TOPIC_STATUS, onlineMsg.c_str());
+      } else {
+        Serial.print("Gagal, rc=");
+        Serial.println(mqttClient.state());
+      }
+    }
+  } else {
+    mqttClient.loop();
+  }
+}
+
 // =============================================================================
 // MODUL SESI PENGUJIAN 30 DETIK (START, FINISH, CANCEL)
 // =============================================================================
@@ -380,6 +467,12 @@ void startTestingSession(unsigned long currentMillis) {
   Serial.println(" LED Status (Biru D33) Berkedip Cepat (Proses Edge AI)...");
   Serial.println(" (Tekan tombol sekali lagi jika ingin membatalkan)");
   Serial.println("========================================================");
+
+  // Publikasi status mulai ke MQTT
+  if (!isApModeActive && mqttClient.connected()) {
+    String startJson = "{\"device\":\"ESP32_AquaSentry\",\"status\":\"testing_started\",\"preset\":\"" + currentPresetName + "\"}";
+    mqttClient.publish(MQTT_TOPIC_STATUS, startJson.c_str());
+  }
 }
 
 void cancelTestingSession() {
@@ -398,6 +491,11 @@ void cancelTestingSession() {
   if (!isApModeActive && client && client.connected()) {
     String cancelJson = "{\"is_testing\":false,\"cancelled\":true,\"edge_ai_class\":\"Cancelled\"}\n";
     client.print(cancelJson);
+  }
+
+  // Publikasi status cancel ke MQTT
+  if (!isApModeActive && mqttClient.connected()) {
+    mqttClient.publish(MQTT_TOPIC_STATUS, "{\"device\":\"ESP32_AquaSentry\",\"status\":\"cancelled\"}");
   }
 }
 
@@ -430,6 +528,19 @@ void finishTestingSession() {
   Serial.println(" [TIMER] LED hasil menyala selama 10 detik, lalu padam otomatis.");
   Serial.println(" Tekan Push Button untuk memulai pengujian baru.");
   Serial.println("========================================================\n");
+
+  // Publikasi Hasil Akhir ke HiveMQ Cloud
+  if (!isApModeActive && mqttClient.connected()) {
+    String resJson = "{";
+    resJson += "\"device\":\"ESP32_AquaSentry\",";
+    resJson += "\"final_verdict\":\"" + finalVerdict + "\",";
+    resJson += "\"preset\":\"" + currentPresetName + "\",";
+    resJson += "\"vote_low\":" + String(voteCountLow) + ",";
+    resJson += "\"vote_medium\":" + String(voteCountMed) + ",";
+    resJson += "\"vote_high\":" + String(voteCountHigh);
+    resJson += "}";
+    mqttClient.publish(MQTT_TOPIC_RESULT, resJson.c_str());
+  }
 }
 
 // =============================================================================
@@ -502,6 +613,22 @@ void processTestingCycle(unsigned long currentMillis) {
       jsonData += "}\n";
       client.print(jsonData);
     }
+
+    // Stream telemetri ke HiveMQ Cloud (Setiap 1 detik / 10 sampel)
+    if (!isApModeActive && mqttClient.connected() && (sampleId % 10 == 0)) {
+      int elapsedSec = (int)(elapsedTestTime / 1000);
+      String mqttJson = "{";
+      mqttJson += "\"device\":\"ESP32_AquaSentry\",";
+      mqttJson += "\"sample_id\":" + String(sampleId) + ",";
+      mqttJson += "\"is_testing\":true,";
+      mqttJson += "\"elapsed_sec\":" + String(elapsedSec) + ",";
+      mqttJson += "\"preset\":\"" + currentPresetName + "\",";
+      mqttJson += "\"tds_ppm\":" + String(tdsPpm, 1) + ",";
+      mqttJson += "\"turbidity_ntu\":" + String(turbidityNtu, 1) + ",";
+      mqttJson += "\"ai_prediction\":\"" + currentAiPrediction + "\"";
+      mqttJson += "}";
+      mqttClient.publish(MQTT_TOPIC_TELEMETRY, mqttJson.c_str());
+    }
   }
 }
 
@@ -537,6 +664,7 @@ void setup() {
   Serial.println("");
   Serial.println("========================================================");
   Serial.println("   ESP32 EDGE AI CLASSIFIER (CLEAN REFACTORED BUILD)");
+  Serial.println("   HIVEMQ CLOUD MQTT ENABLED (PORT 8883 TLS)");
   Serial.println("========================================================");
 
   pinMode(PIN_LED_RED, OUTPUT);
@@ -560,7 +688,7 @@ void setup() {
   savedPassword = preferences.getString("pass", "");
   preferences.end();
 
-  // 2. Logika Koneksi
+  // 2. Logika Koneksi Wi-Fi
   if (savedSsid == "") {
     Serial.println("\n[WIFI] Belum ada Wi-Fi yang dikonfigurasi. Membuka Captive Portal AP!");
     startCaptivePortal();
@@ -594,7 +722,13 @@ void setup() {
     }
   }
 
-  // 3. Kalibrasi Baseline Push Button & Pasang Kunci Pengaman Boot
+  // 3. Konfigurasi HiveMQ Cloud MQTT (TLS 8883)
+  tlsClient.setInsecure(); // Mengabaikan validasi root CA agar bebas masalah sertifikat
+  mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
+  mqttClient.setCallback(mqttCallback);
+  mqttClient.setBufferSize(512);
+
+  // 4. Kalibrasi Baseline Push Button & Pasang Kunci Pengaman Boot
   delay(100);
   buttonIdleState = digitalRead(PIN_BUTTON);
   buttonArmTime = millis() + 1500; // Tombol baru bisa ditekan 1.5 detik setelah siap
@@ -608,12 +742,13 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
 
-  // 1. Layanan Wi-Fi / AP
+  // 1. Layanan Wi-Fi / AP & Cloud MQTT
   if (isApModeActive) {
     dnsServer.processNextRequest();
     webServer.handleClient();
   } else {
     handleTcpCommunication();
+    maintainMqtt();
   }
 
   // 2. Baca Push Button (Toggle: Mulai Uji atau Batalkan Uji)
