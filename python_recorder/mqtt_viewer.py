@@ -17,11 +17,8 @@ import json
 import ssl
 import paho.mqtt.client as mqtt
 
-# Konfigurasi HiveMQ Cloud
-MQTT_BROKER = "4ecff5933a704e218192a9a9390c3580.s1.eu.hivemq.cloud"
-MQTT_PORT   = 8883
-MQTT_USER   = "Aquasentry"
-MQTT_PASS   = "admin123"
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from config import MQTT_BROKER, MQTT_PORT, MQTT_USER, MQTT_PASS
 
 # Topik
 TOPIC_TELEMETRY = "aquasentry/water_quality/telemetry"
